@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>登录 · 教师助手</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="login-body">
+  <form class="login-card" method="post" action="/login">
+    <h1>教师助手</h1>
+    <p class="muted">办公和出题是两个身份，登录后在输入框旁切换。</p>
+    <label>用户名<input name="username" autocomplete="username" required></label>
+    <label>口令<input name="password" type="password" autocomplete="current-password" required></label>
+    <button type="submit">登录</button>
+    <p id="login-error" class="error" hidden>用户名或口令不对。</p>
+  </form>
+  <script>
+    const code = new URLSearchParams(location.search).get("error");
+    const error = document.getElementById("login-error");
+    if (code === "1") {
+      error.hidden = false;
+    }
+    if (code === "2") {
+      error.textContent = "尝试太多次了，请稍后再登录。";
+      error.hidden = false;
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>账号</title>
+  <link rel="stylesheet" href="/static/app.css?v=4">
+</head>
+<body>
+  <header class="top">
+    <span class="brand">教师助手</span>
+    <span class="spacer"></span>
+    <a class="ghost link" href="/">返回对话</a>
+    <form method="post" action="/logout"><button class="ghost" type="submit">退出</button></form>
+  </header>
+  <main class="accounts">
+    <section class="panel">
+      <h1>账号</h1>
+      <form id="create" class="stack">
+        <label>用户名<input name="username" required autocomplete="off"></label>
+        <label>显示名<input name="display_name" required></label>
+        <label>口令<input name="password" type="password" minlength="8" required autocomplete="new-password"></label>
+        <label>角色
+          <select name="role">
+            <option value="teacher">教师</option>
+            <option value="admin">管理员</option>
+          </select>
+        </label>
+        <p class="muted">教材可以现在勾选。不勾就是没有教材，建好后还能改。</p>
+        <div class="filters">
+          <label>学段<select id="create-stage"></select></label>
+          <label>学科<select id="create-subject"></select></label>
+          <label>版本<select id="create-version"></select></label>
+        </div>
+        <div id="create-picked" class="picked"></div>
+        <div id="create-scopes" class="scopes"></div>
+        <button type="submit">新建</button>
+        <p id="create-msg" class="error" hidden></p>
+      </form>
+      <div id="list" class="account-list"></div>
+    </section>
+    <section id="editor" class="panel" hidden>
+      <h2 id="edit-title"></h2>
+      <form id="save" class="stack">
+        <label>显示名<input id="edit-name" required></label>
+        <label>角色
+          <select id="edit-role">
+            <option value="teacher">教师</option>
+            <option value="admin">管理员</option>
+          </select>
+        </label>
+        <label>新口令（留空则不改）<input id="edit-password" type="password" autocomplete="new-password"></label>
+        <label class="check"><input id="edit-disabled" type="checkbox">停用，不能登录</label>
+        <p class="muted">教材按学段、学科、版本筛选后再勾选。不勾就是没有教材。</p>
+        <div class="filters">
+          <label>学段<select id="filter-stage"></select></label>
+          <label>学科<select id="filter-subject"></select></label>
+          <label>版本<select id="filter-version"></select></label>
+        </div>
+        <div id="filter-picked" class="picked"></div>
+        <div id="filter-scopes" class="scopes"></div>
+        <button type="submit">保存</button>
+        <p id="save-msg" class="error" hidden></p>
+      </form>
+    </section>
+  </main>
+  <script>
+    const listEl = document.getElementById("list");
+    const editor = document.getElementById("editor");
+    let catalog = [];
+    let accounts = [];
+    let me = "";
+    let selected = null;
+    let chosen = new Set();
+    let createChosen = new Set();
+
+    function fillSelect(select, values) {
+      const current = select.value;
+      select.innerHTML = "";
+      const blank = document.createElement("option");
+      blank.value = "";
+      blank.textContent = "请选择";
+      select.appendChild(blank);
+      for (const value of values) {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = value;
+        select.appendChild(option);
+      }
+      if (values.includes(current)) select.value = current;
+    }
+
+    function mountScopes(prefix, chosenSet) {
+      const stageEl = document.getElementById(prefix + "-stage");
+      const subjectEl = document.getElementById(prefix + "-subject");
+      const versionEl = document.getElementById(prefix + "-version");
+      const picked = document.getElementById(prefix + "-picked");
+      const scopes = document.getElementById(prefix + "-scopes");
+
+      function render() {
+        const stage = stageEl.value;
+        const subject = subjectEl.value;
+        const version = versionEl.value;
+        scopes.innerHTML = "";
+        picked.innerHTML = "";
+        for (const id of chosenSet) {
+          const item = catalog.find(row => row.id === id);
+          const chip = document.createElement("span");
+          chip.className = "file-chip";
+          chip.textContent = item ? item.stage + item.subject + item.version + " " + item.label : id;
+          picked.appendChild(chip);
+        }
+        if (!stage || !subject || !version) {
+          const hint = document.createElement("p");
+          hint.className = "muted";
+          hint.textContent = "先选学段、学科和版本。";
+          scopes.appendChild(hint);
+          return;
+        }
+        const rows = catalog.filter(item => item.stage === stage && item.subject === subject && item.version === version);
+        if (!rows.length) {
+          const hint = document.createElement("p");
+          hint.className = "muted";
+          hint.textContent = "这个组合没有入库的教材。";
+          scopes.appendChild(hint);
+          return;
+        }
+        for (const item of rows) {
+          const label = document.createElement("label");
+          label.className = "check";
+          const box = document.createElement("input");
+          box.type = "checkbox";
+          box.checked = chosenSet.has(item.id);
+          box.addEventListener("change", () => {
+            if (box.checked) chosenSet.add(item.id);
+            else chosenSet.delete(item.id);
+            render();
+          });
+          label.appendChild(box);
+          label.appendChild(document.createTextNode(item.label));
+          scopes.appendChild(label);
+        }
+      }
+
+      function refresh() {
+        fillSelect(stageEl, [...new Set(catalog.map(item => item.stage))]);
+        const stage = stageEl.value;
+        const subjects = catalog.filter(item => !stage || item.stage === stage).map(item => item.subject);
+        fillSelect(subjectEl, [...new Set(subjects)]);
+        const subject = subjectEl.value;
+        const versions = catalog
+          .filter(item => (!stage || item.stage === stage) && (!subject || item.subject === subject))
+          .map(item => item.version);
+        fillSelect(versionEl, [...new Set(versions)]);
+        render();
+      }
+
+      stageEl.addEventListener("change", refresh);
+      subjectEl.addEventListener("change", refresh);
+      versionEl.addEventListener("change", render);
+      return { refresh };
+    }
+
+    const editScopes = mountScopes("filter", chosen);
+    const newScopes = mountScopes("create", createChosen);
+
+    function renderList() {
+      listEl.innerHTML = "";
+      for (const account of accounts) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "account" + (selected === account.username ? " on" : "");
+        const name = document.createElement("strong");
+        name.textContent = account.display_name + "（" + account.username + "）";
+        button.appendChild(name);
+        const meta = document.createElement("span");
+        const bits = [account.role === "admin" ? "管理员" : "教师"];
+        if (account.disabled) bits.push("已停用");
+        if (!account.scopes.length) bits.push("没有教材");
+        else bits.push(account.scopes.map(item => item.label).join("、"));
+        meta.textContent = bits.join(" · ");
+        button.appendChild(meta);
+        button.addEventListener("click", () => openAccount(account));
+        listEl.appendChild(button);
+      }
+    }
+
+    function openAccount(account) {
+      selected = account.username;
+      chosen.clear();
+      for (const item of account.scopes) chosen.add(item.id);
+      editor.hidden = false;
+      document.getElementById("edit-title").textContent = account.display_name;
+      document.getElementById("edit-name").value = account.display_name;
+      document.getElementById("edit-role").value = account.role;
+      document.getElementById("edit-password").value = "";
+      document.getElementById("edit-disabled").checked = account.disabled;
+      document.getElementById("edit-disabled").disabled = account.username === me;
+      document.getElementById("save-msg").hidden = true;
+      renderList();
+      editScopes.refresh();
+    }
+
+    async function load() {
+      const res = await fetch("/api/accounts");
+      if (res.status === 401) { location.href = "/login"; return; }
+      if (res.status === 403) { location.href = "/"; return; }
+      const data = await res.json();
+      catalog = data.catalog || [];
+      accounts = data.accounts || [];
+      me = data.me || "";
+      renderList();
+      newScopes.refresh();
+      if (selected) {
+        const current = accounts.find(item => item.username === selected);
+        if (current) openAccount(current);
+        else editScopes.refresh();
+      } else {
+        editScopes.refresh();
+      }
+    }
+
+    document.getElementById("create").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const form = event.target;
+      const msg = document.getElementById("create-msg");
+      msg.hidden = true;
+      const res = await fetch("/api/accounts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: form.username.value.trim(),
+          display_name: form.display_name.value.trim(),
+          password: form.password.value,
+          role: form.role.value,
+          scopes: [...createChosen]
+        })
+      });
+      const data = await res.json();
+      msg.hidden = false;
+      if (!res.ok) {
+        msg.textContent = data.error || "没有建成";
+        return;
+      }
+      msg.textContent = "已新建";
+      form.reset();
+      createChosen.clear();
+      newScopes.refresh();
+      await load();
+    });
+
+    document.getElementById("save").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const msg = document.getElementById("save-msg");
+      msg.hidden = true;
+      const res = await fetch("/api/accounts/save", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: selected,
+          display_name: document.getElementById("edit-name").value.trim(),
+          role: document.getElementById("edit-role").value,
+          disabled: document.getElementById("edit-disabled").checked,
+          password: document.getElementById("edit-password").value,
+          scopes: [...chosen]
+        })
+      });
+      const data = await res.json();
+      msg.hidden = false;
+      if (!res.ok) {
+        msg.textContent = data.error || "没有保存";
+        return;
+      }
+      msg.textContent = "已保存";
+      await load();
+    });
+
+    load();
+  </script>
+</body>
+</html>

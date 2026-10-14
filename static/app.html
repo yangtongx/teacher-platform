@@ -1,0 +1,972 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>教师助手</title>
+  <link rel="stylesheet" href="/static/app.css?v=9">
+</head>
+<body class="chat-body">
+  <div class="shell">
+    <aside class="side">
+      <button id="new-chat" class="new-chat" type="button">
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M12 5a1 1 0 0 1 1 1v5h5a1 1 0 1 1 0 2h-5v5a1 1 0 1 1-2 0v-5H6a1 1 0 1 1 0-2h5V6a1 1 0 0 1 1-1z"/></svg>
+        开启新对话
+      </button>
+      <div id="threads" class="threads"></div>
+      <div class="side-foot">
+        <div class="who-row">
+          <span id="avatar" class="avatar"></span>
+          <span id="who"></span>
+        </div>
+        <div class="side-links">
+          <a id="accounts-link" href="/accounts" hidden>账号</a>
+          <button id="password-open" type="button">修改口令</button>
+          <form method="post" action="/logout"><button type="submit">退出</button></form>
+        </div>
+      </div>
+    </aside>
+    <main class="layout">
+      <section id="messages" class="messages"></section>
+      <div class="dock">
+        <p id="notice" class="notice"></p>
+        <p id="working" class="working" hidden></p>
+        <div id="files" class="files"></div>
+        <form id="composer" class="composer">
+          <textarea id="input" rows="2" placeholder="给教师助手发送消息" required></textarea>
+          <div class="composer-bar">
+            <div id="switch" class="switch"></div>
+            <div class="composer-actions">
+              <label class="icon-btn file" title="上传文档">
+                <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" d="M8.5 12.5 15 6a3.2 3.2 0 0 1 4.5 4.5l-8 8a4.2 4.2 0 0 1-6-6l7.2-7.2"/></svg>
+                <input id="file" type="file" accept=".txt,.md,.docx,.pdf,text/plain" hidden>
+              </label>
+              <button id="send" class="send" type="submit" aria-label="发送">
+                <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M12 19a1 1 0 0 1-1-1V8.4l-3.3 3.3a1 1 0 1 1-1.4-1.4l5-5a1 1 0 0 1 1.4 0l5 5a1 1 0 0 1-1.4 1.4L13 8.4V18a1 1 0 0 1-1 1z"/></svg>
+              </button>
+            </div>
+          </div>
+        </form>
+        <p class="disclaimer">内容由 AI 生成，请核对后再使用</p>
+      </div>
+    </main>
+  </div>
+  <form id="password-form" class="password-dialog" hidden>
+    <label>当前口令<input id="password-current" type="password" autocomplete="current-password" required></label>
+    <label>新口令<input id="password-next" type="password" autocomplete="new-password" minlength="8" required></label>
+    <div class="dialog-actions">
+      <button type="submit">保存</button>
+      <button id="password-cancel" class="ghost" type="button">取消</button>
+    </div>
+    <p id="password-msg" class="error" hidden></p>
+  </form>
+  <script>
+    const switchEl = document.getElementById("switch");
+    const messagesEl = document.getElementById("messages");
+    const noticeEl = document.getElementById("notice");
+    const whoEl = document.getElementById("who");
+    const avatarEl = document.getElementById("avatar");
+    const inputEl = document.getElementById("input");
+    const sendEl = document.getElementById("send");
+    const threadsEl = document.getElementById("threads");
+    const filesEl = document.getElementById("files");
+    const accountsLink = document.getElementById("accounts-link");
+    let sending = false;
+    let chatAbort = null;
+    let workTimer = null;
+    let workLabel = "";
+    let workStarted = 0;
+    const workingEl = document.getElementById("working");
+
+    function paintWork() {
+      if (!workStarted) return;
+      const seconds = Math.max(1, Math.round((Date.now() - workStarted) / 1000));
+      workingEl.hidden = false;
+      workingEl.textContent = workLabel + "，已过 " + seconds + " 秒。可以点停止。";
+    }
+
+    function beginWork(label) {
+      sending = true;
+      workStarted = Date.now();
+      workLabel = label;
+      chatAbort = new AbortController();
+      sendEl.type = "button";
+      sendEl.classList.add("stop");
+      sendEl.setAttribute("aria-label", "停止");
+      sendEl.disabled = false;
+      paintWork();
+      if (workTimer) clearInterval(workTimer);
+      workTimer = setInterval(paintWork, 1000);
+    }
+
+    function setWorkLabel(label) {
+      if (!sending || !label) return;
+      workLabel = label;
+      paintWork();
+    }
+
+    function endWork(note) {
+      if (workTimer) clearInterval(workTimer);
+      workTimer = null;
+      chatAbort = null;
+      sending = false;
+      workStarted = 0;
+      sendEl.type = "submit";
+      sendEl.classList.remove("stop");
+      sendEl.setAttribute("aria-label", "发送");
+      sendEl.disabled = false;
+      if (note) {
+        workingEl.hidden = false;
+        workingEl.textContent = note;
+      } else {
+        workingEl.hidden = true;
+        workingEl.textContent = "";
+      }
+    }
+
+    sendEl.addEventListener("click", () => {
+      if (sending && chatAbort) chatAbort.abort();
+    });
+    let exams = [];
+    let pollTimer = null;
+    let agentPending = null;
+    let agentFiles = [];
+
+    function escapeHtml(text) {
+      return text
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    }
+
+    function formatInline(text) {
+      return escapeHtml(text)
+        .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+        .replace(/`([^`]+)`/g, "<code>$1</code>");
+    }
+
+    function inlineMarkdown(text) {
+      const source = String(text);
+      const pattern = /\[([^\]]+)\]\((\/files\/[A-Za-z0-9_-]+)\)/g;
+      let html = "";
+      let last = 0;
+      let match;
+      while ((match = pattern.exec(source))) {
+        html += formatInline(source.slice(last, match.index));
+        html += '<a href="' + escapeHtml(match[2]) + '">' + escapeHtml(match[1]) + "</a>";
+        last = match.index + match[0].length;
+      }
+      html += formatInline(source.slice(last));
+      return html;
+    }
+
+    function renderMarkdown(text) {
+      const lines = String(text || "").replace(/\r\n/g, "\n").split("\n");
+      const parts = [];
+      let list = null;
+      let para = [];
+      let quote = [];
+      const flushList = () => {
+        if (!list || !list.items.length) { list = null; return; }
+        const tag = list.type;
+        parts.push("<" + tag + ">" + list.items.map(item => "<li>" + inlineMarkdown(item) + "</li>").join("") + "</" + tag + ">");
+        list = null;
+      };
+      const flushPara = () => {
+        if (!para.length) return;
+        parts.push("<p>" + para.map(inlineMarkdown).join("<br>") + "</p>");
+        para = [];
+      };
+      const flushQuote = () => {
+        if (!quote.length) return;
+        parts.push("<blockquote>" + quote.map(inlineMarkdown).join("<br>") + "</blockquote>");
+        quote = [];
+      };
+      const flush = () => { flushList(); flushPara(); flushQuote(); };
+      for (const line of lines) {
+        const heading = line.match(/^(#{1,4})\s+(.*)$/);
+        if (heading) {
+          flush();
+          const level = heading[1].length;
+          parts.push("<h" + level + ">" + inlineMarkdown(heading[2]) + "</h" + level + ">");
+          continue;
+        }
+        if (/^\s*(---|\*\*\*)\s*$/.test(line)) {
+          flush();
+          parts.push("<hr>");
+          continue;
+        }
+        const quoted = line.match(/^\s*>\s?(.*)$/);
+        if (quoted) {
+          flushList();
+          flushPara();
+          quote.push(quoted[1]);
+          continue;
+        }
+        const ordered = line.match(/^\s*\d+[.)]\s+(.*)$/);
+        if (ordered) {
+          flushPara();
+          flushQuote();
+          if (!list || list.type !== "ol") { flushList(); list = { type: "ol", items: [] }; }
+          list.items.push(ordered[1]);
+          continue;
+        }
+        const item = line.match(/^\s*[-*]\s+(.*)$/);
+        if (item) {
+          flushPara();
+          flushQuote();
+          if (!list || list.type !== "ul") { flushList(); list = { type: "ul", items: [] }; }
+          list.items.push(item[1]);
+          continue;
+        }
+        if (!line.trim()) {
+          flush();
+          continue;
+        }
+        flushList();
+        flushQuote();
+        para.push(line);
+      }
+      flush();
+      return parts.join("");
+    }
+
+    function fillBubble(el, role, content) {
+      el.innerHTML = "";
+      const body = document.createElement("div");
+      body.className = "body";
+      if (role === "user") body.textContent = content;
+      else body.innerHTML = renderMarkdown(content);
+      el.appendChild(body);
+      if (role !== "assistant" || !content) return;
+      const tools = document.createElement("div");
+      tools.className = "msg-tools";
+      const copy = document.createElement("button");
+      copy.type = "button";
+      copy.className = "icon-btn";
+      copy.title = "复制";
+      copy.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><rect x="8" y="8" width="11" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M6 15H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v1" fill="none" stroke="currentColor" stroke-width="1.7"/></svg>';
+      copy.addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText(content);
+          copy.title = "已复制";
+        } catch (err) {
+          copy.title = "复制失败";
+        }
+      });
+      tools.appendChild(copy);
+      el.appendChild(tools);
+    }
+
+    function scrollMessages() {
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    function sseMessage(raw) {
+      const line = String(raw || "").split("\n").find(row => row.startsWith("data:"));
+      if (!line) return "";
+      try {
+        const payload = JSON.parse(line.slice(5).trim());
+        return payload.error || "";
+      } catch (err) {
+        return "";
+      }
+    }
+
+    async function failureText(res) {
+      try {
+        const data = await res.json();
+        if (data && data.error) return data.error;
+      } catch (err) {
+        /* 不是 JSON 时用下面的兜底 */
+      }
+      return "发送失败。";
+    }
+
+    function renderMessages(items) {
+      messagesEl.innerHTML = "";
+      if (!items.length) {
+        const empty = document.createElement("div");
+        empty.className = "hello";
+        empty.innerHTML = "<h1>今天想处理什么？</h1><p>可以写通知、整理材料，或出一份试卷。</p>";
+        messagesEl.appendChild(empty);
+        return;
+      }
+      for (const item of items) {
+        const div = document.createElement("div");
+        div.className = "bubble " + (item.role === "user" ? "user" : "assistant");
+        fillBubble(div, item.role, item.content);
+        messagesEl.appendChild(div);
+        if (item.files && item.files.length) messagesEl.appendChild(fileCard(item.files));
+      }
+      scrollMessages();
+    }
+
+    function threadGroup(updated) {
+      const date = new Date(updated || "");
+      if (Number.isNaN(date.getTime())) return "更早";
+      const now = new Date();
+      const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      const day = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+      const diff = Math.round((start - day) / 86400000);
+      if (diff <= 0) return "今天";
+      if (diff < 7) return "7 天内";
+      if (diff < 30) return "30 天内";
+      return date.getFullYear() + "-" + String(date.getMonth() + 1).padStart(2, "0");
+    }
+
+    function renderThreads(items, activeId) {
+      threadsEl.innerHTML = "";
+      let last = "";
+      for (const item of items) {
+        const group = threadGroup(item.updated_at);
+        if (group !== last) {
+          const label = document.createElement("p");
+          label.className = "thread-label";
+          label.textContent = group;
+          threadsEl.appendChild(label);
+          last = group;
+        }
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = item.id === activeId ? "thread on" : "thread";
+        button.textContent = item.title || "新对话";
+        button.addEventListener("click", () => openThread(item.id));
+        threadsEl.appendChild(button);
+      }
+    }
+
+    function renderUploads(items) {
+      filesEl.innerHTML = "";
+      for (const item of items) {
+        const row = document.createElement("span");
+        row.className = "file-chip";
+        row.textContent = item.filename;
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "ghost chip-x";
+        remove.textContent = "移除";
+        remove.addEventListener("click", () => removeUpload(item.id));
+        row.appendChild(remove);
+        filesEl.appendChild(row);
+      }
+    }
+
+    function renderSwitch(identities, active) {
+      switchEl.innerHTML = "";
+      for (const item of identities) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = item.id === active ? "chip on" : "chip";
+        button.setAttribute("aria-pressed", item.id === active ? "true" : "false");
+        button.textContent = item.id === "lesson" ? "出题" : (item.id === "office" ? "办公助手" : item.label);
+        button.title = item.label;
+        button.addEventListener("click", () => choose(item.id));
+        switchEl.appendChild(button);
+      }
+    }
+
+    function fileLink(url, name) {
+      const link = document.createElement("a");
+      link.href = url;
+      link.textContent = name;
+      return link;
+    }
+
+    function optionRow(name, id, label, detail, checked, onPick) {
+      const row = document.createElement("label");
+      row.className = "ask-option";
+      const radio = document.createElement("input");
+      radio.type = "radio";
+      radio.name = name;
+      radio.checked = checked;
+      radio.addEventListener("change", () => onPick(id));
+      const text = document.createElement("span");
+      text.textContent = label;
+      if (detail) {
+        const small = document.createElement("small");
+        small.textContent = detail;
+        text.appendChild(small);
+      }
+      row.append(radio, text);
+      return row;
+    }
+
+    async function submitExam(id, extra, box) {
+      const buttons = box.querySelectorAll("button");
+      buttons.forEach(button => { button.disabled = true; });
+      const res = await fetch("/api/exams/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(Object.assign({ id: id }, extra))
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        buttons.forEach(button => { button.disabled = false; });
+        const err = box.querySelector(".error");
+        if (err) {
+          err.hidden = false;
+          err.textContent = data.error || "没有开始出卷";
+        }
+        return;
+      }
+      replaceExam(data);
+    }
+
+    function askingCard(exam) {
+      const box = document.createElement("div");
+      box.className = "ask-card";
+      const questions = exam.questions || [];
+      let step = 0;
+      const answers = {};
+
+      function paint() {
+        const question = questions[step];
+        box.replaceChildren();
+        if (!question) return;
+        if (step === 0 && exam.notice) {
+          const note = document.createElement("p");
+          note.textContent = exam.notice;
+          box.appendChild(note);
+        }
+        const meta = document.createElement("p");
+        meta.className = "muted";
+        meta.textContent = "问题  " + (step + 1) + "/" + questions.length;
+        box.appendChild(meta);
+        const title = document.createElement("p");
+        title.className = "ask-title";
+        title.textContent = question.prompt;
+        box.appendChild(title);
+        const group = "ask-" + exam.id + "-" + question.id;
+        let picked = answers[question.id] || "";
+        const options = question.options || [];
+        options.forEach(option => {
+          box.appendChild(optionRow(group, option.id, option.label, option.detail, picked === option.id, (id) => {
+            picked = id;
+            answers[question.id] = id;
+          }));
+        });
+        const customValue = picked && !options.some(option => option.id === picked) ? picked : "";
+        const customRow = document.createElement("label");
+        customRow.className = "ask-option";
+        const customRadio = document.createElement("input");
+        customRadio.type = "radio";
+        customRadio.name = group;
+        customRadio.checked = picked === "__custom__" || Boolean(customValue);
+        const customLabel = document.createElement("span");
+        customLabel.textContent = "在此输入你自己的答案";
+        customRow.append(customRadio, customLabel);
+        const customText = document.createElement("input");
+        customText.placeholder = "在此输入你自己的答案";
+        customText.value = customValue;
+        customRadio.addEventListener("change", () => {
+          picked = "__custom__";
+          answers[question.id] = customText.value.trim();
+        });
+        customText.addEventListener("input", () => {
+          customRadio.checked = true;
+          picked = "__custom__";
+          answers[question.id] = customText.value.trim();
+        });
+        box.append(customRow, customText);
+        const actions = document.createElement("div");
+        actions.className = "ask-actions";
+        const back = document.createElement("button");
+        back.type = "button";
+        back.className = "ghost";
+        back.textContent = "返回";
+        back.disabled = step === 0;
+        back.addEventListener("click", () => { step -= 1; paint(); });
+        const right = document.createElement("div");
+        right.className = "ask-right";
+        const skip = document.createElement("button");
+        skip.type = "button";
+        skip.className = "ghost";
+        skip.textContent = "跳过";
+        skip.addEventListener("click", () => submitExam(exam.id, { skip: true }, box));
+        const next = document.createElement("button");
+        next.type = "button";
+        next.textContent = step === questions.length - 1 ? "提交" : "下一步";
+        next.addEventListener("click", () => {
+          const value = picked === "__custom__" || customRadio.checked ? customText.value.trim() : picked;
+          const chosen = options.some(option => option.id === picked) ? picked : value;
+          if (!chosen) return;
+          answers[question.id] = chosen;
+          if (step < questions.length - 1) {
+            step += 1;
+            paint();
+            return;
+          }
+          submitExam(exam.id, { answers: answers }, box);
+        });
+        right.append(skip, next);
+        actions.append(back, right);
+        box.appendChild(actions);
+        const err = document.createElement("p");
+        err.className = "error";
+        err.hidden = true;
+        box.appendChild(err);
+      }
+
+      paint();
+      return box;
+    }
+
+    function examCard(exam) {
+      if (exam.status === "asking") return askingCard(exam);
+      const box = document.createElement("div");
+      box.className = "ask-card";
+      if (exam.notice && exam.status !== "failed") {
+        const note = document.createElement("p");
+        note.textContent = exam.notice;
+        box.appendChild(note);
+      }
+      const line = document.createElement("p");
+      if (exam.status === "running") line.textContent = "正在后台出卷，好了会给出下载链接。";
+      else if (exam.status === "failed") line.textContent = exam.error || "出卷没有完成。";
+      else line.textContent = "试卷已生成。";
+      box.appendChild(line);
+      if (exam.status === "done") {
+        const links = document.createElement("div");
+        links.className = "ask-links";
+        if (exam.paper_url) links.appendChild(fileLink(exam.paper_url, exam.paper_name || "下载试卷"));
+        if (exam.answer_url) links.appendChild(fileLink(exam.answer_url, exam.answer_name || "下载参考答案"));
+        box.appendChild(links);
+        if (exam.listening_note) {
+          const extra = document.createElement("p");
+          extra.className = "muted";
+          extra.textContent = exam.listening_note;
+          box.appendChild(extra);
+        }
+      }
+      return box;
+    }
+
+    function renderExamList() {
+      const old = messagesEl.querySelector(".exam-list");
+      if (old) old.remove();
+      if (!exams.length) return;
+      const wrap = document.createElement("div");
+      wrap.className = "exam-list";
+      exams.forEach(item => wrap.appendChild(examCard(item)));
+      messagesEl.appendChild(wrap);
+    }
+
+    function watchExams() {
+      if (!exams.some(item => item.status === "running")) {
+        if (pollTimer) {
+          clearInterval(pollTimer);
+          pollTimer = null;
+        }
+        return;
+      }
+      if (pollTimer) return;
+      pollTimer = setInterval(refreshExamCards, 3000);
+    }
+
+    async function refreshExamCards() {
+      const wasRunning = new Set(exams.filter(item => item.status === "running").map(item => item.id));
+      const res = await fetch("/api/state");
+      if (!res.ok) return;
+      const data = await res.json();
+      const next = data.exams || [];
+      const finished = next.some(item => wasRunning.has(item.id) && item.status !== "running");
+      exams = next;
+      renderExamList();
+      watchExams();
+      if (finished) scrollMessages();
+    }
+
+    function replaceExam(exam) {
+      const index = exams.findIndex(item => item.id === exam.id);
+      if (index >= 0) exams[index] = exam;
+      else exams.push(exam);
+      renderExamList();
+      watchExams();
+      scrollMessages();
+    }
+
+    function fileCard(files) {
+      const done = document.createElement("div");
+      done.className = "ask-card file-card";
+      const line = document.createElement("p");
+      line.textContent = "文件已生成，请下载。";
+      const links = document.createElement("div");
+      links.className = "ask-links";
+      files.forEach(item => links.appendChild(fileLink(item.url, item.name || "下载")));
+      done.append(line, links);
+      const note = files.map(item => item.listening_note).find(Boolean);
+      if (note) {
+        const extra = document.createElement("p");
+        extra.className = "muted";
+        extra.textContent = note;
+        done.appendChild(extra);
+      }
+      return done;
+    }
+
+    function renderAgent() {
+      const old = messagesEl.querySelector(".agent-box");
+      if (old) old.remove();
+      if (!agentPending || !agentPending.questions || !agentPending.questions.length) return;
+      const box = document.createElement("div");
+      box.className = "agent-box";
+      box.appendChild(agentAskCard(agentPending.questions));
+      messagesEl.appendChild(box);
+    }
+
+    function agentAskCard(questions) {
+      const box = document.createElement("div");
+      box.className = "ask-card";
+      let step = 0;
+      const answers = questions.map(() => ({ selected: [], other: "" }));
+
+      function paint() {
+        const question = questions[step];
+        box.replaceChildren();
+        if (question.context) {
+          const note = document.createElement("p");
+          note.textContent = question.context;
+          box.appendChild(note);
+        }
+        const meta = document.createElement("p");
+        meta.className = "muted";
+        meta.textContent = (question.header ? question.header + "  " : "") + "问题  " + (step + 1) + "/" + questions.length;
+        box.appendChild(meta);
+        const title = document.createElement("p");
+        title.className = "ask-title";
+        title.textContent = question.question;
+        box.appendChild(title);
+        const group = "agent-ask-" + step;
+        let picked = answers[step].selected[0] || "";
+        (question.options || []).forEach(option => {
+          box.appendChild(optionRow(group, option.label, option.label, option.description, picked === option.label, (id) => {
+            picked = id;
+            answers[step].selected = [id];
+            answers[step].other = "";
+          }));
+        });
+        const custom = document.createElement("input");
+        custom.placeholder = "在此输入你自己的答案";
+        custom.value = answers[step].other || "";
+        custom.addEventListener("input", () => {
+          answers[step].other = custom.value.trim();
+          answers[step].selected = [];
+          picked = "";
+        });
+        box.appendChild(custom);
+        const actions = document.createElement("div");
+        actions.className = "ask-actions";
+        const back = document.createElement("button");
+        back.type = "button";
+        back.className = "ghost";
+        back.textContent = "返回";
+        back.disabled = step === 0;
+        back.addEventListener("click", () => { step -= 1; paint(); });
+        const right = document.createElement("div");
+        right.className = "ask-right";
+        const skip = document.createElement("button");
+        skip.type = "button";
+        skip.className = "ghost";
+        skip.textContent = "跳过";
+        skip.addEventListener("click", () => sendAgent({ skip: true }, box));
+        const next = document.createElement("button");
+        next.type = "button";
+        next.textContent = step === questions.length - 1 ? "提交" : "下一步";
+        next.addEventListener("click", () => {
+          if (custom.value.trim()) {
+            answers[step].other = custom.value.trim();
+            answers[step].selected = [];
+          }
+          if (!answers[step].selected.length && !answers[step].other) return;
+          if (step < questions.length - 1) {
+            step += 1;
+            paint();
+            return;
+          }
+          sendAgent({ answers: answers }, box);
+        });
+        right.append(skip, next);
+        actions.append(back, right);
+        box.appendChild(actions);
+        const err = document.createElement("p");
+        err.className = "error";
+        err.hidden = true;
+        box.appendChild(err);
+      }
+
+      paint();
+      return box;
+    }
+
+    async function sendAgent(extra, box) {
+      const buttons = box.querySelectorAll("button");
+      buttons.forEach(button => { button.disabled = true; });
+      const assistant = document.createElement("div");
+      assistant.className = "bubble assistant";
+      assistant.textContent = "正在继续。";
+      messagesEl.appendChild(assistant);
+      beginWork("正在继续");
+      let stopped = false;
+      try {
+        const res = await fetch("/api/agent/answer", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(extra),
+          signal: chatAbort.signal
+        });
+        if (!res.ok) {
+          assistant.textContent = await failureText(res);
+          buttons.forEach(button => { button.disabled = false; });
+          return;
+        }
+        agentPending = null;
+        await readChatStream(res, assistant, "");
+      } catch (err) {
+        if (err && err.name === "AbortError") {
+          stopped = true;
+          if (assistant.textContent === "正在继续。" || assistant.textContent.endsWith("…")) {
+            assistant.textContent = "已停止。";
+          }
+          return;
+        }
+        assistant.textContent = "网络中断了，请再发一次。";
+        buttons.forEach(button => { button.disabled = false; });
+      } finally {
+        endWork(stopped ? "已停止。" : "");
+        scrollMessages();
+      }
+    }
+
+    async function readChatStream(res, assistant, answer) {
+      if (!res.body || !res.body.getReader) {
+        const fallback = sseMessage(await res.text());
+        if (fallback) assistant.textContent = fallback;
+        return answer;
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const step = await reader.read();
+        if (step.done) break;
+        buffer += decoder.decode(step.value, { stream: true });
+        let cut;
+        while ((cut = buffer.indexOf("\n\n")) >= 0) {
+          const block = buffer.slice(0, cut);
+          buffer = buffer.slice(cut + 2);
+          const line = block.split("\n").find(row => row.startsWith("data:"));
+          if (!line) continue;
+          const payload = JSON.parse(line.slice(5).trim());
+          if (payload.status) {
+            setWorkLabel(payload.status);
+            if (!answer) assistant.textContent = payload.status + "…";
+          }
+          if (payload.delta) {
+            answer += payload.delta;
+            fillBubble(assistant, "assistant", answer);
+          }
+          if (payload.ask) {
+            agentPending = payload.ask;
+            if (!answer) assistant.remove();
+            renderAgent();
+          }
+          if (payload.files && payload.files.length) {
+            const previous = assistant.nextElementSibling;
+            if (previous && previous.classList.contains("file-card")) previous.remove();
+            assistant.after(fileCard(payload.files));
+            scrollMessages();
+          }
+          if (payload.error) assistant.textContent = payload.error;
+          if (payload.done && payload.message_id && answer && assistant.isConnected) {
+            fillBubble(assistant, "assistant", answer);
+          }
+        }
+      }
+      return answer;
+    }
+
+    function showThread(data) {
+      exams = data.exams || [];
+      agentPending = (data.agent && data.agent.pending) || null;
+      agentFiles = (data.agent && data.agent.files) || [];
+      renderThreads(data.conversations || [], data.conversation_id);
+      renderUploads(data.uploads || []);
+      renderMessages(data.messages || []);
+      renderExamList();
+      renderAgent();
+      watchExams();
+    }
+
+    async function load() {
+      const res = await fetch("/api/state");
+      if (res.status === 401) { location.href = "/login"; return; }
+      const data = await res.json();
+      whoEl.textContent = data.display_name;
+      avatarEl.textContent = (data.display_name || "师").slice(0, 1);
+      accountsLink.hidden = data.role !== "admin";
+      noticeEl.textContent = data.notice;
+      document.title = (data.identities.find(i => i.id === data.identity) || {}).label || "教师助手";
+      renderSwitch(data.identities, data.identity);
+      showThread(data);
+    }
+
+    async function choose(identity) {
+      if (sending) return;
+      const res = await fetch("/api/identity", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ identity })
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      document.title = data.label;
+      const buttons = switchEl.querySelectorAll("button");
+      buttons.forEach(button => {
+        const on = button.title === data.label;
+        button.className = on ? "chip on" : "chip";
+        button.setAttribute("aria-pressed", on ? "true" : "false");
+      });
+      showThread(data);
+    }
+
+    async function openThread(id) {
+      if (sending) return;
+      const res = await fetch("/api/conversations/open", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id })
+      });
+      if (!res.ok) return;
+      showThread(await res.json());
+    }
+
+    document.getElementById("new-chat").addEventListener("click", async () => {
+      if (sending) return;
+      const res = await fetch("/api/conversations", { method: "POST" });
+      if (res.status === 401) { location.href = "/login"; return; }
+      if (!res.ok) return;
+      showThread(await res.json());
+    });
+
+    async function removeUpload(id) {
+      const res = await fetch("/api/uploads/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id })
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      renderUploads(data.uploads || []);
+    }
+
+    document.getElementById("file").addEventListener("change", async (event) => {
+      const file = event.target.files && event.target.files[0];
+      event.target.value = "";
+      if (!file) return;
+      const body = new FormData();
+      body.append("file", file);
+      const res = await fetch("/api/uploads", { method: "POST", body });
+      const data = await res.json();
+      if (!res.ok) {
+        alert(data.error || "上传失败");
+        return;
+      }
+      renderUploads(data.uploads || []);
+    });
+
+    document.getElementById("composer").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const content = inputEl.value.trim();
+      if (!content || sending) return;
+      inputEl.value = "";
+      beginWork("正在处理");
+      const current = threadsEl.querySelector(".thread.on");
+      if (current && current.textContent === "新对话") {
+        current.textContent = content.replace(/\s+/g, " ").slice(0, 24);
+      }
+      const userBubble = document.createElement("div");
+      userBubble.className = "bubble user";
+      fillBubble(userBubble, "user", content);
+      const empty = messagesEl.querySelector(".hello");
+      if (empty) empty.remove();
+      messagesEl.appendChild(userBubble);
+      let assistant = null;
+      let answer = "";
+      let stopped = false;
+      function ensureAssistant() {
+        if (!assistant) {
+          assistant = document.createElement("div");
+          assistant.className = "bubble assistant";
+          messagesEl.appendChild(assistant);
+        }
+        return assistant;
+      }
+      try {
+        const res = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content }),
+          signal: chatAbort.signal
+        });
+        if (res.status === 401) { location.href = "/login"; return; }
+        if (!res.ok) {
+          ensureAssistant().textContent = await failureText(res);
+          return;
+        }
+        if (!res.body || !res.body.getReader) {
+          const fallback = sseMessage(await res.text());
+          if (fallback) ensureAssistant().textContent = fallback;
+          else if (!answer) ensureAssistant().textContent = "发送失败。";
+          return;
+        }
+        ensureAssistant().textContent = "正在判断下一步。";
+        answer = await readChatStream(res, assistant, answer);
+      } catch (err) {
+        if (err && err.name === "AbortError") {
+          stopped = true;
+          if (!answer) ensureAssistant().textContent = "已停止。";
+        } else {
+          ensureAssistant().textContent = "网络中断了，请再发一次。";
+        }
+      } finally {
+        endWork(stopped ? "已停止。" : "");
+        scrollMessages();
+      }
+    });
+
+    const passwordForm = document.getElementById("password-form");
+    const passwordMsg = document.getElementById("password-msg");
+    document.getElementById("password-open").addEventListener("click", () => {
+      passwordForm.hidden = false;
+      passwordMsg.hidden = true;
+    });
+    document.getElementById("password-cancel").addEventListener("click", () => {
+      passwordForm.hidden = true;
+    });
+    passwordForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      passwordMsg.hidden = true;
+      const res = await fetch("/api/password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          current: document.getElementById("password-current").value,
+          password: document.getElementById("password-next").value
+        })
+      });
+      const data = await res.json();
+      passwordMsg.hidden = false;
+      if (!res.ok) {
+        passwordMsg.textContent = data.error || "没有改成";
+        return;
+      }
+      passwordMsg.textContent = "口令已更新，请重新登录";
+      window.location.href = "/login";
+    });
+
+    load();
+  </script>
+</body>
+</html>

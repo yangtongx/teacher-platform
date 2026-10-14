@@ -1,0 +1,24 @@
+name: teacher-platform
+
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: teacher-platform:latest
+    env_file:
+      - ../.env
+    environment:
+      DATA_DIR: /srv/teacher-platform/data
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - ../data:/srv/teacher-platform/data
+      - /data/corpus:/data/corpus:ro
+    ports:
+      - "172.28.0.1:18900:18900"
+    restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL

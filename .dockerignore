@@ -1,0 +1,8 @@
+.git
+.venv
+.venv312
+data
+.env
+**/__pycache__
+**/*.pyc
+initial-password.txt

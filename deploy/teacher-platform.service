@@ -1,0 +1,15 @@
+[Unit]
+Description=教师助手
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/srv/teacher-platform
+ExecStart=/usr/bin/docker compose -f /srv/teacher-platform/deploy/docker-compose.yml up -d --wait
+ExecStop=/usr/bin/docker compose -f /srv/teacher-platform/deploy/docker-compose.yml stop
+TimeoutStartSec=180
+
+[Install]
+WantedBy=multi-user.target

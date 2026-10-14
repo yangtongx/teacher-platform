@@ -15,6 +15,7 @@ from app.config import (
     DOWNLOAD_TTL_SECONDS,
     IDENTITIES,
     SESSION_TTL_SECONDS,
+    THREAD,
 )
 
 SCHEMA = """
@@ -92,13 +93,14 @@ CREATE TABLE IF NOT EXISTS exams (
   created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS agent_sessions (
-  conversation_id INTEGER PRIMARY KEY,
+  conversation_id INTEGER NOT NULL,
   user_id INTEGER NOT NULL,
   identity TEXT NOT NULL,
   state_json TEXT NOT NULL,
   pending_json TEXT,
   files_json TEXT,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (conversation_id, identity)
 );
 CREATE TABLE IF NOT EXISTS audit_log (
   id INTEGER PRIMARY KEY,
@@ -154,6 +156,7 @@ def init_db() -> None:
                 if "duplicate column" not in str(exc).lower():
                     raise
         _migrate_conversations(conn)
+        _migrate_agent_sessions(conn)
         _ensure_column(conn, "documents", "expires_at", "TEXT")
         _ensure_column(conn, "messages", "files_json", "TEXT")
         conn.execute(
@@ -208,6 +211,43 @@ def _purge_expired_documents(conn: sqlite3.Connection) -> None:
         path = DATA_DIR / "docs" / f"{row['token']}.docx"
         path.unlink(missing_ok=True)
         conn.execute("DELETE FROM documents WHERE token = ?", (row["token"],))
+
+
+def _migrate_agent_sessions(conn: sqlite3.Connection) -> None:
+    """同一段对话里，出题和办公各记一份记忆，互不覆盖。"""
+    info = list(conn.execute("PRAGMA table_info(agent_sessions)"))
+    if not info:
+        return
+    primary = [row["name"] for row in sorted(info, key=lambda item: item["pk"]) if row["pk"]]
+    if primary == ["conversation_id", "identity"]:
+        return
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute(
+        """
+        CREATE TABLE agent_sessions_new (
+          conversation_id INTEGER NOT NULL,
+          user_id INTEGER NOT NULL,
+          identity TEXT NOT NULL,
+          state_json TEXT NOT NULL,
+          pending_json TEXT,
+          files_json TEXT,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY (conversation_id, identity)
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO agent_sessions_new (
+          conversation_id, user_id, identity, state_json, pending_json, files_json, updated_at
+        )
+        SELECT conversation_id, user_id, identity, state_json, pending_json, files_json, updated_at
+        FROM agent_sessions
+        """
+    )
+    conn.execute("DROP TABLE agent_sessions")
+    conn.execute("ALTER TABLE agent_sessions_new RENAME TO agent_sessions")
+    conn.execute("PRAGMA foreign_keys = ON")
 
 
 def _migrate_conversations(conn: sqlite3.Connection) -> None:
@@ -280,9 +320,9 @@ def is_admin(user: object) -> bool:
     return role == "admin"
 
 
-def create_session(user_id: int, identity: str = "lesson") -> str:
-    if identity not in IDENTITIES:
-        identity = "lesson"
+def create_session(user_id: int, identity: str = THREAD) -> str:
+    if identity not in IDENTITIES and identity != THREAD:
+        identity = THREAD
     token = new_session_token()
     expires = iso(utcnow() + timedelta(seconds=SESSION_TTL_SECONDS))
     with connect() as conn:
@@ -290,8 +330,7 @@ def create_session(user_id: int, identity: str = "lesson") -> str:
             "INSERT INTO sessions (token, user_id, identity, expires_at) VALUES (?, ?, ?, ?)",
             (token, user_id, identity, expires),
         )
-        for name in IDENTITIES:
-            _ensure_focus(conn, user_id, name)
+        _ensure_focus(conn, user_id, identity)
         conn.commit()
     return token
 
@@ -338,7 +377,52 @@ def delete_user_sessions(user_id: int) -> None:
         conn.commit()
 
 
+def _ensure_thread(conn: sqlite3.Connection, user_id: int) -> int:
+    """老师的当前对话。没有单独的主对话时，沿用最近一段，避免旧试卷从列表里消失。"""
+    row = conn.execute(
+        "SELECT conversation_id FROM focus WHERE user_id = ? AND identity = ?",
+        (user_id, THREAD),
+    ).fetchone()
+    if row is not None:
+        found = conn.execute(
+            "SELECT id FROM conversations WHERE id = ? AND user_id = ?",
+            (row["conversation_id"], user_id),
+        ).fetchone()
+        if found is not None:
+            return int(found["id"])
+    latest = conn.execute(
+        """
+        SELECT id FROM conversations
+        WHERE user_id = ?
+        ORDER BY updated_at DESC, id DESC LIMIT 1
+        """,
+        (user_id,),
+    ).fetchone()
+    if latest is None:
+        now = iso(utcnow())
+        cursor = conn.execute(
+            """
+            INSERT INTO conversations (user_id, identity, title, created_at, updated_at)
+            VALUES (?, ?, '新对话', ?, ?)
+            """,
+            (user_id, THREAD, now, now),
+        )
+        conversation = int(cursor.lastrowid)
+    else:
+        conversation = int(latest["id"])
+    conn.execute(
+        """
+        INSERT INTO focus (user_id, identity, conversation_id) VALUES (?, ?, ?)
+        ON CONFLICT(user_id, identity) DO UPDATE SET conversation_id = excluded.conversation_id
+        """,
+        (user_id, THREAD, conversation),
+    )
+    return conversation
+
+
 def _ensure_focus(conn: sqlite3.Connection, user_id: int, identity: str) -> int:
+    if identity == THREAD:
+        return _ensure_thread(conn, user_id)
     row = conn.execute(
         "SELECT conversation_id FROM focus WHERE user_id = ? AND identity = ?",
         (user_id, identity),
@@ -391,14 +475,24 @@ def list_conversations(user_id: int, identity: str) -> list[dict]:
     with connect() as conn:
         _ensure_focus(conn, user_id, identity)
         conn.commit()
-        rows = conn.execute(
-            """
-            SELECT id, title, updated_at FROM conversations
-            WHERE user_id = ? AND identity = ?
-            ORDER BY updated_at DESC, id DESC
-            """,
-            (user_id, identity),
-        ).fetchall()
+        if identity == THREAD:
+            rows = conn.execute(
+                """
+                SELECT id, title, updated_at FROM conversations
+                WHERE user_id = ?
+                ORDER BY updated_at DESC, id DESC
+                """,
+                (user_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT id, title, updated_at FROM conversations
+                WHERE user_id = ? AND identity = ?
+                ORDER BY updated_at DESC, id DESC
+                """,
+                (user_id, identity),
+            ).fetchall()
     return [{"id": r["id"], "title": r["title"], "updated_at": r["updated_at"]} for r in rows]
 
 
@@ -438,10 +532,16 @@ def create_conversation(user_id: int, identity: str) -> int:
 
 def open_conversation(user_id: int, identity: str, conversation: int) -> bool:
     with connect() as conn:
-        row = conn.execute(
-            "SELECT id FROM conversations WHERE id = ? AND user_id = ? AND identity = ?",
-            (conversation, user_id, identity),
-        ).fetchone()
+        if identity == THREAD:
+            row = conn.execute(
+                "SELECT id FROM conversations WHERE id = ? AND user_id = ?",
+                (conversation, user_id),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT id FROM conversations WHERE id = ? AND user_id = ? AND identity = ?",
+                (conversation, user_id, identity),
+            ).fetchone()
         if row is None:
             return False
         conn.execute(
@@ -521,8 +621,15 @@ def list_messages(user_id: int, identity: str) -> list[dict]:
     return result
 
 
-def add_message(user_id: int, identity: str, role: str, content: str, files: list | None = None) -> int:
-    cid = conversation_id(user_id, identity)
+def add_message(
+    user_id: int,
+    identity: str,
+    role: str,
+    content: str,
+    files: list | None = None,
+    conversation: int | None = None,
+) -> int:
+    cid = conversation if conversation is not None else conversation_id(user_id, identity)
     now = iso(utcnow())
     title = " ".join(content.split())[:24] or "新对话"
     files_json = json.dumps(files, ensure_ascii=False) if files else None
@@ -1009,15 +1116,63 @@ def rate_hit(bucket: str) -> None:
         conn.commit()
 
 
-def load_agent_session(user_id: int, conversation_id: int) -> sqlite3.Row | None:
+def load_agent_session(
+    user_id: int, conversation_id: int, identity: str | None = None
+) -> sqlite3.Row | None:
     with connect() as conn:
+        if identity:
+            return conn.execute(
+                """
+                SELECT * FROM agent_sessions
+                WHERE conversation_id = ? AND user_id = ? AND identity = ?
+                """,
+                (conversation_id, user_id, identity),
+            ).fetchone()
         return conn.execute(
             """
             SELECT * FROM agent_sessions
             WHERE conversation_id = ? AND user_id = ?
+            ORDER BY CASE
+              WHEN pending_json IS NOT NULL AND pending_json != '' THEN 0
+              ELSE 1
+            END, updated_at DESC
+            LIMIT 1
             """,
             (conversation_id, user_id),
         ).fetchone()
+
+
+def pending_agent(user_id: int, conversation_id: int) -> str | None:
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT identity FROM agent_sessions
+            WHERE conversation_id = ? AND user_id = ?
+              AND pending_json IS NOT NULL AND pending_json != ''
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (conversation_id, user_id),
+        ).fetchone()
+    if row is None or row["identity"] not in IDENTITIES:
+        return None
+    return row["identity"]
+
+
+def last_agent(user_id: int, conversation_id: int) -> str | None:
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT identity FROM agent_sessions
+            WHERE conversation_id = ? AND user_id = ?
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (conversation_id, user_id),
+        ).fetchone()
+    if row is None or row["identity"] not in IDENTITIES:
+        return None
+    return row["identity"]
 
 
 def save_agent_session(
@@ -1035,9 +1190,8 @@ def save_agent_session(
             INSERT INTO agent_sessions (
               conversation_id, user_id, identity, state_json, pending_json, files_json, updated_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(conversation_id) DO UPDATE SET
+            ON CONFLICT(conversation_id, identity) DO UPDATE SET
               user_id = excluded.user_id,
-              identity = excluded.identity,
               state_json = excluded.state_json,
               pending_json = excluded.pending_json,
               files_json = excluded.files_json,

@@ -159,6 +159,9 @@ class ConversationTests(unittest.TestCase):
 
         db.init_db()
         user = db.user_by_username("teacher")
+        with db.connect() as conn:
+            conn.execute("DELETE FROM uploads WHERE user_id = ?", (user["id"],))
+            conn.commit()
         text = extract_text("note.txt", "周五下午开家长会".encode("utf-8"))
         db.add_upload(user["id"], "lesson", "note.txt", text)
         self.assertIn("家长会", db.upload_context(user["id"], "lesson"))

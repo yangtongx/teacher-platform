@@ -15,9 +15,9 @@ from app import db, exam
 from app.auth import hash_password, verify_password
 from app.config import (
     DATA_DIR,
-    IDENTITIES,
     SESSION_COOKIE,
     SESSION_TTL_SECONDS,
+    THREAD,
     chat_limit,
     chat_window_seconds,
     cookie_secure,
@@ -50,18 +50,49 @@ def _client_ip(request: Request) -> str:
     return (peer or "unknown")[:64]
 
 
+def _host_key(value: str) -> str:
+    text = (value or "").strip().lower()
+    if not text:
+        return ""
+    if text.startswith("[") and "]" in text:
+        host = text[1:text.index("]")]
+        rest = text[text.index("]") + 1 :]
+        if rest in {"", ":80", ":443"}:
+            return host
+        return f"{host}{rest}"
+    if text.count(":") == 1:
+        host, port = text.rsplit(":", 1)
+        if port in {"80", "443"}:
+            return host
+    return text
+
+
 def _origin_allowed(request: Request) -> bool:
+    """同源表单才放行。页面若声明不发送来源，浏览器会把 Origin 写成 null。"""
     host = request.headers.get("host", "")
-    origin = request.headers.get("origin")
+    origin = (request.headers.get("origin") or "").strip()
+    site = request.headers.get("sec-fetch-site", "")
+    if origin == "null":
+        return site == "same-origin"
     if not host or not origin:
         return True
-    return urlparse(origin).netloc == host
+    allowed = {_host_key(host)}
+    forwarded = request.headers.get("x-forwarded-host", "")
+    for item in forwarded.split(","):
+        item = item.strip()
+        if item:
+            allowed.add(_host_key(item))
+    origin_host = _host_key(urlparse(origin).netloc)
+    if origin_host in allowed:
+        return True
+    LOG.info("origin rejected host=%s origin=%s site=%s", host, origin, site or "-")
+    return False
 
 
 def _secure_headers(response):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
-    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; script-src 'self' 'unsafe-inline'; "
         "style-src 'self'; img-src 'self' data:; font-src 'self'; "
@@ -129,7 +160,7 @@ async def login(request: Request):
         db.rate_hit(bucket)
         db.audit(None, "login_fail", username[:64])
         return RedirectResponse("/login?error=1", status_code=303)
-    token = db.create_session(int(user["id"]), "lesson")
+    token = db.create_session(int(user["id"]), THREAD)
     db.audit(int(user["id"]), "login", user["username"])
     response = RedirectResponse("/", status_code=303)
     response.set_cookie(
@@ -163,33 +194,15 @@ def state(request: Request):
     _, session = current(request)
     if session is None:
         return JSONResponse({"error": "未登录"}, status_code=401)
-    user, identity = session
+    user, _identity = session
     return {
         "username": user["username"],
         "display_name": user["display_name"],
         "role": user["role"],
-        "identity": identity,
-        "identities": [{"id": key, "label": spec["label"]} for key, spec in IDENTITIES.items()],
+        "identity": THREAD,
+        "identities": [],
         "notice": textbook_notice(user),
-        **_thread(int(user["id"]), identity),
-    }
-
-
-@app.post("/api/identity")
-async def switch_identity(request: Request):
-    token, session = current(request)
-    if session is None:
-        return JSONResponse({"error": "未登录"}, status_code=401)
-    body = await request.json()
-    identity = str(body.get("identity") or "")
-    if identity not in IDENTITIES:
-        return JSONResponse({"error": "没有这个身份"}, status_code=400)
-    db.set_identity(token, identity)
-    user, _ = session
-    return {
-        "identity": identity,
-        "label": IDENTITIES[identity]["label"],
-        **_thread(int(user["id"]), identity),
+        **_thread(int(user["id"]), THREAD),
     }
 
 
@@ -198,26 +211,22 @@ async def chat(request: Request):
     _, session = current(request)
     if session is None:
         return JSONResponse({"error": "未登录"}, status_code=401)
-    user, identity = session
+    user, _identity = session
     body = await request.json()
     content = str(body.get("content") or "").strip()
     if not content:
         return JSONResponse({"error": "请输入内容"}, status_code=400)
     if len(content) > 8000:
         return JSONResponse({"error": "这条太长了"}, status_code=400)
-    blocked = exam.boundary_message(identity, content)
-    if blocked:
-        return JSONResponse({"error": blocked}, status_code=400)
     user_id = int(user["id"])
     if not _spend_chat(user_id):
         return JSONResponse({"error": "这一小时里的请求太多了，请稍后再试。"}, status_code=429)
-    db.add_message(user_id, identity, "user", content)
 
     async def events():
         try:
-            from app.scope_agent import respond
+            from app.agents.conductor import handle_turn
 
-            async for item in respond(user, identity, content):
+            async for item in handle_turn(user, content):
                 yield _sse(item)
         except Exception as exc:
             yield _sse({"error": _agent_error(exc)})
@@ -291,9 +300,9 @@ def new_conversation(request: Request):
     _, session = current(request)
     if session is None:
         return JSONResponse({"error": "未登录"}, status_code=401)
-    user, identity = session
-    db.create_conversation(int(user["id"]), identity)
-    return _thread(int(user["id"]), identity)
+    user, _identity = session
+    db.create_conversation(int(user["id"]), THREAD)
+    return _thread(int(user["id"]), THREAD)
 
 
 @app.post("/api/conversations/open")
@@ -301,15 +310,15 @@ async def open_conversation(request: Request):
     _, session = current(request)
     if session is None:
         return JSONResponse({"error": "未登录"}, status_code=401)
-    user, identity = session
+    user, _identity = session
     body = await request.json()
     try:
         conversation = int(body.get("id"))
     except (TypeError, ValueError):
         return JSONResponse({"error": "没有这段对话"}, status_code=400)
-    if not db.open_conversation(int(user["id"]), identity, conversation):
+    if not db.open_conversation(int(user["id"]), THREAD, conversation):
         return JSONResponse({"error": "没有这段对话"}, status_code=404)
-    return _thread(int(user["id"]), identity)
+    return _thread(int(user["id"]), THREAD)
 
 
 @app.post("/api/uploads")
@@ -317,7 +326,7 @@ async def upload_document(request: Request):
     _, session = current(request)
     if session is None:
         return JSONResponse({"error": "未登录"}, status_code=401)
-    user, identity = session
+    user, _identity = session
     form = await request.form()
     upload = form.get("file")
     if upload is None or not hasattr(upload, "read"):
@@ -333,10 +342,10 @@ async def upload_document(request: Request):
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     user_id = int(user["id"])
-    if db.upload_count(user_id, identity) >= MAX_UPLOADS:
+    if db.upload_count(user_id, THREAD) >= MAX_UPLOADS:
         return JSONResponse({"error": "这段对话最多 8 个文档"}, status_code=400)
-    db.add_upload(user_id, identity, filename, text)
-    return {"uploads": db.list_uploads(user_id, identity)}
+    db.add_upload(user_id, THREAD, filename, text)
+    return {"uploads": db.list_uploads(user_id, THREAD)}
 
 
 @app.post("/api/uploads/delete")
@@ -344,7 +353,7 @@ async def remove_upload(request: Request):
     _, session = current(request)
     if session is None:
         return JSONResponse({"error": "未登录"}, status_code=401)
-    user, identity = session
+    user, _identity = session
     body = await request.json()
     try:
         upload_id = int(body.get("id"))
@@ -352,7 +361,7 @@ async def remove_upload(request: Request):
         return JSONResponse({"error": "没有这份文档"}, status_code=400)
     if not db.delete_upload(int(user["id"]), upload_id):
         return JSONResponse({"error": "没有这份文档"}, status_code=404)
-    return {"uploads": db.list_uploads(int(user["id"]), identity)}
+    return {"uploads": db.list_uploads(int(user["id"]), THREAD)}
 
 
 @app.get("/accounts")
@@ -442,9 +451,7 @@ async def begin_exam(request: Request):
     _, session = current(request)
     if session is None:
         return JSONResponse({"error": "未登录"}, status_code=401)
-    user, identity = session
-    if identity != "lesson":
-        return JSONResponse({"error": "出卷请换到教案设计与出题专家。"}, status_code=403)
+    user, _identity = session
     body = await request.json()
     try:
         exam_id = int(body.get("id"))
@@ -455,8 +462,8 @@ async def begin_exam(request: Request):
     if row is None or row["status"] != "asking":
         return JSONResponse({"error": "这份试卷不在待确认状态"}, status_code=400)
     owned = db.conversation_owner(int(row["conversation_id"]))
-    if owned is None or owned["identity"] != "lesson":
-        return JSONResponse({"error": "出卷请换到教案设计与出题专家。"}, status_code=403)
+    if owned is None or int(owned["user_id"]) != user_id:
+        return JSONResponse({"error": "没有这份试卷"}, status_code=404)
     if db.running_exam(user_id):
         return JSONResponse({"error": "上一份试卷还在生成，完成后再出下一套。"}, status_code=400)
     if not _spend_chat(user_id):
@@ -489,7 +496,7 @@ async def agent_answer(request: Request):
     _, session = current(request)
     if session is None:
         return JSONResponse({"error": "未登录"}, status_code=401)
-    user, identity = session
+    user, _identity = session
     body = await request.json()
     answers = body.get("answers") if isinstance(body.get("answers"), list) else []
     if not _spend_chat(int(user["id"])):
@@ -497,9 +504,9 @@ async def agent_answer(request: Request):
 
     async def events():
         try:
-            from app.scope_agent import respond
+            from app.agents.conductor import resume_turn
 
-            async for item in respond(user, identity, None, answers, skip=bool(body.get("skip"))):
+            async for item in resume_turn(user, answers, skip=bool(body.get("skip"))):
                 yield _sse(item)
         except Exception as exc:
             yield _sse({"error": _agent_error(exc)})
@@ -531,7 +538,7 @@ def _thread(user_id: int, identity: str) -> dict:
     user = db.user_by_id(user_id)
     cards = [exam.public_exam(row, user) for row in db.list_exams(user_id, identity)] if user else []
     try:
-        from app.scope_agent import public_view
+        from app.agents.runtime import public_view
 
         agent_view = public_view(user_id, identity)
     except Exception:

@@ -387,9 +387,8 @@ def write_exam_files(user, conversation_id: int, student: str, answer: str) -> l
     if (
         owned is None
         or int(owned["user_id"]) != int(user["id"])
-        or owned["identity"] != "lesson"
     ):
-        raise ValueError("出卷请换到教案设计与出题专家。")
+        raise ValueError("这份对话不能导出试卷。")
     paper = student_markdown(student)
     answer_text = (answer or "").strip()
     if not paper or not answer_text:

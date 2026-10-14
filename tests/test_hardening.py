@@ -37,6 +37,24 @@ class HardeningTests(unittest.TestCase):
         self.assertIn("frame-ancestors 'none'", health.headers["content-security-policy"])
         self.assertEqual(health.headers["x-content-type-options"], "nosniff")
 
+    def test_null_origin_on_same_site_logout_reaches_login(self):
+        from fastapi.testclient import TestClient
+
+        from app.main import app
+
+        client = TestClient(app)
+        response = client.post(
+            "/logout",
+            headers={"Origin": "null", "Sec-Fetch-Site": "same-origin"},
+            follow_redirects=False,
+        )
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(response.headers["location"], "/login")
+        self.assertEqual(
+            client.get("/healthz").headers["referrer-policy"],
+            "strict-origin-when-cross-origin",
+        )
+
     def test_cross_origin_post_is_rejected(self):
         from fastapi.testclient import TestClient
 
@@ -47,6 +65,19 @@ class HardeningTests(unittest.TestCase):
             "/login",
             data={"username": "teacher", "password": "test-password-1"},
             headers={"Origin": "https://evil.example"},
+            follow_redirects=False,
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_null_origin_from_another_site_is_rejected(self):
+        from fastapi.testclient import TestClient
+
+        from app.main import app
+
+        client = TestClient(app)
+        response = client.post(
+            "/logout",
+            headers={"Origin": "null", "Sec-Fetch-Site": "cross-site"},
             follow_redirects=False,
         )
         self.assertEqual(response.status_code, 403)
@@ -130,10 +161,7 @@ class HardeningTests(unittest.TestCase):
             extract.MAX_UNCOMPRESSED = previous
 
     def test_lesson_skills_leave_out_cloud_and_feishu(self):
-        try:
-            from app.scope_agent import skill_directories, tool_call_allowed
-        except ImportError:
-            self.skipTest("agentscope is not installed")
+        from app.agents.registry import skill_directories, tool_call_allowed
         names = [path.name for path in skill_directories("lesson")]
         self.assertEqual(names, ["exam-generator", "markdown-to-exam-docx"])
         self.assertEqual(skill_directories("office"), [])
@@ -142,10 +170,29 @@ class HardeningTests(unittest.TestCase):
         self.assertFalse(tool_call_allowed("bash"))
         self.assertFalse(tool_call_allowed(""))
 
-    def test_identity_boundary_stops_before_the_model(self):
+    def test_router_sends_exam_and_notice_to_different_agents(self):
         from fastapi.testclient import TestClient
 
         from app.main import app
+
+        seen = []
+
+        async def fake_respond(user, identity, content=None, answers=None, skip=False, conversation_id=None):
+            seen.append((identity, content))
+            yield {"delta": identity}
+            yield {"done": True, "message_id": 1}
+
+        from unittest.mock import patch
+
+        import app.agents.conductor as conductor
+        from app.agents import router as agent_router
+        from app.agents.router import decide
+
+        agent_router.DEEPSEEK_API_KEY = ""
+        self.assertEqual(decide("再出一道", "lesson")["route"], "lesson")
+        mixed = decide("出一套试卷，再写一份家长通知", None)
+        self.assertEqual(mixed["route"], "lesson")
+        self.assertIn("通知", mixed["next"])
 
         client = TestClient(app)
         logged = client.post(
@@ -154,14 +201,18 @@ class HardeningTests(unittest.TestCase):
             follow_redirects=False,
         )
         self.assertEqual(logged.status_code, 303)
-        client.post("/api/identity", json={"identity": "office"})
-        office = client.post("/api/chat", json={"content": "帮我出一套期中试卷"})
-        self.assertEqual(office.status_code, 400)
-        self.assertIn("教案设计与出题专家", office.json()["error"])
-        client.post("/api/identity", json={"identity": "lesson"})
-        lesson = client.post("/api/chat", json={"content": "写一份家长会通知"})
-        self.assertEqual(lesson.status_code, 400)
-        self.assertIn("教师办公助手", lesson.json()["error"])
+        with patch.object(conductor, "_respond", fake_respond):
+            exam_reply = client.post("/api/chat", json={"content": "帮我出一套期中试卷"})
+            notice_reply = client.post("/api/chat", json={"content": "写一份家长会通知"})
+        self.assertEqual(exam_reply.status_code, 200)
+        self.assertEqual(notice_reply.status_code, 200)
+        self.assertEqual(seen[0][0], "lesson")
+        self.assertEqual(seen[1][0], "office")
+        self.assertIn("试卷", seen[0][1])
+        ask = client.post("/api/chat", json={"content": "你好"})
+        self.assertEqual(ask.status_code, 200)
+        self.assertIn("出题", ask.text)
+        self.assertEqual(len(seen), 2)
 
     def test_office_cannot_export_an_exam(self):
         from app.exam import write_exam_files

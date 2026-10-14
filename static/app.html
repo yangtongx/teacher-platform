@@ -35,7 +35,6 @@
         <form id="composer" class="composer">
           <textarea id="input" rows="2" placeholder="给教师助手发送消息" required></textarea>
           <div class="composer-bar">
-            <div id="switch" class="switch"></div>
             <div class="composer-actions">
               <label class="icon-btn file" title="上传文档">
                 <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" d="M8.5 12.5 15 6a3.2 3.2 0 0 1 4.5 4.5l-8 8a4.2 4.2 0 0 1-6-6l7.2-7.2"/></svg>
@@ -61,7 +60,6 @@
     <p id="password-msg" class="error" hidden></p>
   </form>
   <script>
-    const switchEl = document.getElementById("switch");
     const messagesEl = document.getElementById("messages");
     const noticeEl = document.getElementById("notice");
     const whoEl = document.getElementById("who");
@@ -350,20 +348,6 @@
         remove.addEventListener("click", () => removeUpload(item.id));
         row.appendChild(remove);
         filesEl.appendChild(row);
-      }
-    }
-
-    function renderSwitch(identities, active) {
-      switchEl.innerHTML = "";
-      for (const item of identities) {
-        const button = document.createElement("button");
-        button.type = "button";
-        button.className = item.id === active ? "chip on" : "chip";
-        button.setAttribute("aria-pressed", item.id === active ? "true" : "false");
-        button.textContent = item.id === "lesson" ? "出题" : (item.id === "office" ? "办公助手" : item.label);
-        button.title = item.label;
-        button.addEventListener("click", () => choose(item.id));
-        switchEl.appendChild(button);
       }
     }
 
@@ -807,27 +791,7 @@
       avatarEl.textContent = (data.display_name || "师").slice(0, 1);
       accountsLink.hidden = data.role !== "admin";
       noticeEl.textContent = data.notice;
-      document.title = (data.identities.find(i => i.id === data.identity) || {}).label || "教师助手";
-      renderSwitch(data.identities, data.identity);
-      showThread(data);
-    }
-
-    async function choose(identity) {
-      if (sending) return;
-      const res = await fetch("/api/identity", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ identity })
-      });
-      if (!res.ok) return;
-      const data = await res.json();
-      document.title = data.label;
-      const buttons = switchEl.querySelectorAll("button");
-      buttons.forEach(button => {
-        const on = button.title === data.label;
-        button.className = on ? "chip on" : "chip";
-        button.setAttribute("aria-pressed", on ? "true" : "false");
-      });
+      document.title = "教师助手";
       showThread(data);
     }
 

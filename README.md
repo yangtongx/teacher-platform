@@ -1,8 +1,23 @@
 # 教师助手
 
-自建的教师端。两个身份在顶栏手动切换：教师办公助手、教案设计与出题专家。不依赖 OpenClaw。
+自建的教师端。老师只和一个主助手说话，主助手把出题交给教案专家、把通知交给办公助手。不依赖 OpenClaw。
 
 现网 `openclaw-teacher.xiaoyangtx.cloud` 仍在腾讯云，本项目不替换它。教材和教师账号会拷到华为云，腾讯云上的原件保留。
+
+## 结构
+
+老师只看到一个主助手。代码按多智能体拆开，主助手不写试卷，也不写通知。
+
+```
+app/agents/
+  conductor.py    主助手：接收老师的话，按顺序交给专家
+  router.py       意图识别：出题、办公，或先问一句
+  registry.py     专家名单、技能和工具白名单
+  runtime.py      各专家共用的执行循环
+  tools.py        查教材、导出试卷
+  lesson/         教案设计与出题专家
+  office/         教师办公助手
+```
 
 ## 部署
 
@@ -19,11 +34,11 @@ bash deploy/install.sh
 
 浏览器打开 `http://teacher-platform.xiaoyangtx.cloud/`。第一次安装生成的口令在服务器的 `/srv/teacher-platform/initial-password.txt`，用户名是 `teacher`。
 
-DeepSeek 密钥写在服务器 `/srv/teacher-platform/.env` 的 `DEEPSEEK_API_KEY`。不写也能登录和切换身份，发送时会提示未配置。
+DeepSeek 密钥写在服务器 `/srv/teacher-platform/.env` 的 `DEEPSEEK_API_KEY`。不写也能登录，发送时会提示未配置。
 
 教材在数据盘 `/data/corpus`（`/srv/corpus` 是指过去的链接），从腾讯云原样拷来，腾讯云上的那份还留着。教师账号从原来的花名册导入，口令哈希不变，所以原来的用户名和口令可以登录。教案身份按账号上的教材范围检索；没有范围的账号不能按课文引用。助手回复可以下载成 Word，文件只给当前登录的老师。顶栏可以修改口令。
 
-每个身份可以新开对话，左侧能翻回以前的对话。当前对话可以上传 txt、md、docx、pdf，助手只把里面的文字当资料。安装账号（`.env` 里的 `ADMIN_USERNAME`）是管理员，顶栏有「账号」：可以新建、停用，并按学段学科版本勾选教材。
+左侧是同一份对话列表，可以新开对话，也能翻回以前的。当前对话可以上传 txt、md、docx、pdf，助手只把里面的文字当资料。安装账号（`.env` 里的 `ADMIN_USERNAME`）是管理员，顶栏有「账号」：可以新建、停用，并按学段学科版本勾选教材。
 
 ## 本地
 

@@ -65,6 +65,10 @@ def chat_limit() -> int:
 def chat_window_seconds() -> int:
     return max(60, int(os.environ.get("CHAT_WINDOW_SECONDS", "3600")))
 
+
+# 老师只看到这一条对话。出题和办公是背后的两个身份。
+THREAD = "main"
+
 IDENTITIES = {
     "office": {
         "label": "教师办公助手",

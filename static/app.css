@@ -353,6 +353,7 @@ a.link { padding: 8px 12px; border-radius: 10px; }
 .composer-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; }
 .file { cursor: pointer; }
 .send {
+  position: relative;
   width: 36px;
   height: 36px;
   border-radius: 50%;
@@ -362,6 +363,24 @@ a.link { padding: 8px 12px; border-radius: 10px; }
   background: var(--accent);
   color: #fff;
 }
+.send::before {
+  content: "Enter 发送，Shift+Enter 换行";
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: #1f2329;
+  color: #fff;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+}
+.send:hover::before,
+.send:focus-visible::before { opacity: 1; }
+.send.stop::before { content: none; }
 .send.stop svg { display: none; }
 .send.stop::after {
   content: "";

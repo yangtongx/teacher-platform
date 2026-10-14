@@ -88,6 +88,15 @@ def _save(user, identity: str, conversation_id: int, agent, pending, files) -> N
     )
 
 
+def _fresh_files() -> list:
+    """只有这一轮刚导出的文件才交给老师。以前已经给过的下载不要再挂到新回复下面。"""
+    ctx = _teacher.get() or {}
+    if not ctx.get("files_ready"):
+        return []
+    found = ctx.get("files") or []
+    return list(found) if isinstance(found, list) else []
+
+
 def public_view(user_id: int, identity: str) -> dict:
     conversation_id = db.conversation_id(user_id, identity)
     row = db.load_agent_session(user_id, conversation_id)
@@ -201,7 +210,9 @@ async def respond(
         conversation_id = db.conversation_id(int(user["id"]), identity)
     ns, agent, row = _build(user, identity, conversation_id)
     pending = json.loads(row["pending_json"]) if row is not None and row["pending_json"] else None
-    files = json.loads(row["files_json"]) if row is not None and row["files_json"] else []
+    stored = json.loads(row["files_json"]) if row is not None and row["files_json"] else []
+    # 出卷后如果还停在提问上，这些文件还没写进消息，回答完再给一次。
+    owe_files = bool(pending) and isinstance(stored, list) and bool(stored)
     if answers is not None or (skip and pending):
         if not pending:
             yield {"error": "现在没有待确认的问题。"}
@@ -223,7 +234,8 @@ async def respond(
             "identity": identity,
             "conversation_id": conversation_id,
             "goal": content or "",
-            "files": list(files),
+            "files": list(stored) if owe_files else [],
+            "files_ready": owe_files,
         }
     )
     try:
@@ -239,18 +251,16 @@ async def respond(
                 yield {"delta": event["text"]}
             elif event["kind"] == "ask":
                 pending_out = event["pending"]
-                _save(user, identity, conversation_id, agent, pending_out, files)
+                _save(user, identity, conversation_id, agent, pending_out, _fresh_files() or None)
                 yield {"ask": {"questions": pending_out["questions"]}}
                 return
             elif event["kind"] == "final":
                 final_text = event["text"] or final_text
             elif event["kind"] == "error":
-                _save(user, identity, conversation_id, agent, None, files)
+                _save(user, identity, conversation_id, agent, None, None)
                 yield {"error": event["text"]}
                 return
-        produced = _teacher.get()["files"]
-        if produced:
-            files = produced
+        files = _fresh_files()
         message_id = None
         if final_text.strip():
             message_id = db.add_message(
@@ -272,10 +282,7 @@ async def respond(
             yield {"files": files}
         yield {"done": True, "message_id": message_id}
     except asyncio.CancelledError:
-        ctx = _teacher.get()
-        produced = ctx["files"] if ctx else []
-        if produced:
-            files = produced
+        files = _fresh_files()
         if final_text.strip() or files:
             text = final_text.strip() or "试卷已生成，请下载试卷和参考答案。"
             db.add_message(

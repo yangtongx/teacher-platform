@@ -132,6 +132,7 @@ class ExportExam(_TeacherTool):
         except ValueError as exc:
             return _chunk(str(exc))
         turn["files"] = files
+        turn["files_ready"] = True
         lines = ["试卷已生成，只把下面的文件名和链接告诉老师，不要再粘贴题目。"]
         for item in files:
             lines.append(f"{item['name']} {item['url']}")

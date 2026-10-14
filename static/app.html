@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>教师助手</title>
-  <link rel="stylesheet" href="/static/app.css?v=11">
+  <link rel="stylesheet" href="/static/app.css?v=12">
 </head>
 <body class="chat-body">
   <div class="shell">
@@ -45,7 +45,7 @@
                 <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" d="M8.5 12.5 15 6a3.2 3.2 0 0 1 4.5 4.5l-8 8a4.2 4.2 0 0 1-6-6l7.2-7.2"/></svg>
                 <input id="file" type="file" accept=".txt,.md,.docx,.pdf,text/plain" hidden>
               </label>
-              <button id="send" class="send" type="submit" aria-label="发送">
+              <button id="send" class="send" type="submit" aria-label="发送" title="Enter 发送，Shift+Enter 换行">
                 <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M12 19a1 1 0 0 1-1-1V8.4l-3.3 3.3a1 1 0 1 1-1.4-1.4l5-5a1 1 0 0 1 1.4 0l5 5a1 1 0 0 1-1.4 1.4L13 8.4V18a1 1 0 0 1-1 1z"/></svg>
               </button>
             </div>
@@ -292,6 +292,19 @@
       return "发送失败。";
     }
 
+    let shownFileUrls = new Set();
+
+    function unseenFiles(files) {
+      const fresh = [];
+      for (const item of files || []) {
+        const url = item && item.url;
+        if (!url || shownFileUrls.has(url)) continue;
+        shownFileUrls.add(url);
+        fresh.push(item);
+      }
+      return fresh;
+    }
+
     function renderMessages(items) {
       messagesEl.innerHTML = "";
       if (!items.length) {
@@ -301,12 +314,14 @@
         messagesEl.appendChild(empty);
         return;
       }
+      shownFileUrls = new Set();
       for (const item of items) {
         const div = document.createElement("div");
         div.className = "bubble " + (item.role === "user" ? "user" : "assistant");
         fillBubble(div, item.role, item.content);
         messagesEl.appendChild(div);
-        if (item.files && item.files.length) messagesEl.appendChild(fileCard(item.files));
+        const fresh = unseenFiles(item.files);
+        if (fresh.length) messagesEl.appendChild(fileCard(fresh));
       }
       scrollMessages();
     }
@@ -924,10 +939,13 @@
             renderAgent();
           }
           if (payload.files && payload.files.length) {
-            const previous = assistant.nextElementSibling;
-            if (previous && previous.classList.contains("file-card")) previous.remove();
-            assistant.after(fileCard(payload.files));
-            scrollMessages();
+            const fresh = unseenFiles(payload.files);
+            if (fresh.length) {
+              const previous = assistant.nextElementSibling;
+              if (previous && previous.classList.contains("file-card")) previous.remove();
+              assistant.after(fileCard(fresh));
+              scrollMessages();
+            }
           }
           if (payload.error) assistant.textContent = payload.error;
           if (payload.done && payload.message_id && answer && assistant.isConnected) {
@@ -1012,6 +1030,13 @@
         return;
       }
       renderUploads(data.uploads || []);
+    });
+
+    inputEl.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" || event.shiftKey || event.isComposing || event.keyCode === 229) return;
+      event.preventDefault();
+      if (!inputEl.value.trim() || sending) return;
+      document.getElementById("composer").requestSubmit();
     });
 
     document.getElementById("composer").addEventListener("submit", async (event) => {

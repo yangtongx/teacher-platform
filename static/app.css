@@ -189,6 +189,7 @@ a.link { padding: 8px 12px; border-radius: 10px; }
   color: var(--muted);
   font-size: 13px;
 }
+.thread-bar[hidden] { display: none; }
 .thread-bar span { flex: 1; }
 .thread-bar button { padding: 6px 10px; }
 .thread-bar button.danger { background: var(--danger); color: #fff; }

@@ -112,19 +112,86 @@ a.link { padding: 8px 12px; border-radius: 10px; }
   color: var(--muted);
   font-size: 12px;
 }
+.thread-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: 10px;
+  min-width: 0;
+}
+.thread-row:hover { background: #eef0f4; }
+.thread-row.on { background: #e7eeff; }
+.thread-check {
+  width: 16px;
+  height: 16px;
+  margin: 0 2px 0 8px;
+  flex: none;
+}
 .thread {
+  flex: 1;
+  min-width: 0;
   text-align: left;
   background: transparent;
   color: var(--ink);
   border: 0;
   border-radius: 10px;
-  padding: 8px 10px;
+  padding: 8px 4px 8px 10px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.thread:hover { background: #eef0f4; }
-.thread.on { background: #e7eeff; color: var(--ink); }
+.thread:hover { background: transparent; }
+.thread-more {
+  display: none;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  margin-right: 4px;
+  padding: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+}
+.thread-row:hover .thread-more,
+.thread-row.on .thread-more { display: grid; place-items: center; }
+.thread-rename {
+  flex: 1;
+  min-width: 0;
+  margin: 4px 8px;
+  padding: 6px 8px;
+}
+.thread-menu {
+  position: fixed;
+  z-index: 30;
+  width: 132px;
+  padding: 4px;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(16, 24, 40, 0.12);
+  display: grid;
+}
+.thread-menu button {
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: 8px;
+}
+.thread-menu button:hover { background: #f3f5f8; }
+.thread-menu button.danger { color: var(--danger); }
+.thread-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 4px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.thread-bar span { flex: 1; }
+.thread-bar button { padding: 6px 10px; }
+.thread-bar button.danger { background: var(--danger); color: #fff; }
 .side-foot { display: grid; gap: 8px; padding: 8px 4px 0; }
 .who-row { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .avatar {

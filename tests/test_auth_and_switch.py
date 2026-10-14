@@ -154,6 +154,53 @@ class ConversationTests(unittest.TestCase):
         self.assertIn("写一份放假通知", restored)
         self.assertFalse(db.open_conversation(user["id"], "lesson", previous))
 
+    def test_rename_and_delete_only_own_threads(self):
+        db.init_db()
+        db.create_account("ren", "任老师", "password-ok", "teacher", [])
+        user = db.user_by_username("ren")
+        other = db.user_by_username("teacher")
+        message_id = db.add_message(user["id"], "main", "user", "写一份放假通知")
+        cid = db.conversation_id(user["id"], "main")
+        self.assertTrue(db.rename_conversation(user["id"], cid, "  家长会通知  "))
+        titled = {item["id"]: item["title"] for item in db.list_conversations(user["id"], "main")}
+        self.assertEqual(titled[cid], "家长会通知")
+        long_name = "一二三四五六七八九十" * 5
+        self.assertTrue(db.rename_conversation(user["id"], cid, long_name))
+        titled = {item["id"]: item["title"] for item in db.list_conversations(user["id"], "main")}
+        self.assertEqual(titled[cid], long_name[:40])
+        self.assertFalse(db.rename_conversation(user["id"], cid, "   "))
+        self.assertFalse(db.rename_conversation(other["id"], cid, "别人改的"))
+        kept = db.create_conversation(user["id"], "main")
+        docs = db.DATA_DIR / "docs"
+        docs.mkdir(parents=True, exist_ok=True)
+        token = "ren-doc-token"
+        (docs / f"{token}.docx").write_bytes(b"paper")
+        db.save_document(user["id"], message_id, token, "通知.docx")
+        db.save_agent_session(user["id"], cid, "lesson", "{}", None, None)
+        self.assertEqual(db.delete_conversations(other["id"], [cid, kept]), 0)
+        self.assertEqual(db.delete_conversations(user["id"], ["nope", cid, cid]), 1)
+        self.assertFalse((docs / f"{token}.docx").exists())
+        self.assertIsNone(db.document_for_user(user["id"], token))
+        with db.connect() as conn:
+            self.assertEqual(
+                conn.execute("SELECT id FROM messages WHERE conversation_id = ?", (cid,)).fetchall(),
+                [],
+            )
+            self.assertIsNone(
+                conn.execute(
+                    "SELECT conversation_id FROM agent_sessions WHERE conversation_id = ?",
+                    (cid,),
+                ).fetchone()
+            )
+        left = [item["id"] for item in db.list_conversations(user["id"], "main")]
+        self.assertNotIn(cid, left)
+        self.assertIn(kept, left)
+        self.assertEqual(db.delete_conversations(user["id"], [kept]), 1)
+        again = db.list_conversations(user["id"], "main")
+        self.assertEqual(len(again), 1)
+        self.assertEqual(again[0]["title"], "新对话")
+        self.assertNotEqual(again[0]["id"], kept)
+
     def test_upload_stays_on_its_conversation(self):
         from app.extract import extract_text
 

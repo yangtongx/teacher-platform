@@ -321,6 +321,37 @@ async def open_conversation(request: Request):
     return _thread(int(user["id"]), THREAD)
 
 
+@app.post("/api/conversations/rename")
+async def rename_conversation(request: Request):
+    _, session = current(request)
+    if session is None:
+        return JSONResponse({"error": "未登录"}, status_code=401)
+    user, _identity = session
+    body = await request.json()
+    try:
+        conversation = int(body.get("id"))
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "没有这段对话"}, status_code=400)
+    if not db.rename_conversation(int(user["id"]), conversation, str(body.get("title") or "")):
+        return JSONResponse({"error": "这段对话没法改名"}, status_code=400)
+    return _thread(int(user["id"]), THREAD)
+
+
+@app.post("/api/conversations/delete")
+async def remove_conversations(request: Request):
+    _, session = current(request)
+    if session is None:
+        return JSONResponse({"error": "未登录"}, status_code=401)
+    user, _identity = session
+    body = await request.json()
+    raw = body.get("ids")
+    if not isinstance(raw, list) or not raw:
+        return JSONResponse({"error": "没有要删除的对话"}, status_code=400)
+    if not db.delete_conversations(int(user["id"]), raw):
+        return JSONResponse({"error": "没有这段对话"}, status_code=404)
+    return _thread(int(user["id"]), THREAD)
+
+
 @app.post("/api/uploads")
 async def upload_document(request: Request):
     _, session = current(request)

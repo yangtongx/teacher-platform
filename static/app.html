@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>教师助手</title>
-  <link rel="stylesheet" href="/static/app.css?v=9">
+  <link rel="stylesheet" href="/static/app.css?v=10">
 </head>
 <body class="chat-body">
   <div class="shell">
@@ -14,6 +14,11 @@
         开启新对话
       </button>
       <div id="threads" class="threads"></div>
+      <div id="thread-bar" class="thread-bar" hidden>
+        <span id="thread-count">已选 0 段</span>
+        <button id="thread-delete" class="danger" type="button">删除</button>
+        <button id="thread-cancel" class="ghost" type="button">取消</button>
+      </div>
       <div class="side-foot">
         <div class="who-row">
           <span id="avatar" class="avatar"></span>
@@ -70,6 +75,11 @@
     const filesEl = document.getElementById("files");
     const accountsLink = document.getElementById("accounts-link");
     let sending = false;
+    let threadItems = [];
+    let activeThread = null;
+    let selectMode = false;
+    let selectedIds = new Set();
+    let threadMenu = null;
     let chatAbort = null;
     let workTimer = null;
     let workLabel = "";
@@ -314,7 +324,24 @@
       return date.getFullYear() + "-" + String(date.getMonth() + 1).padStart(2, "0");
     }
 
+    function closeThreadMenu() {
+      if (threadMenu) threadMenu.remove();
+      threadMenu = null;
+    }
+
+    function paintThreadBar() {
+      const bar = document.getElementById("thread-bar");
+      bar.hidden = !selectMode;
+      document.getElementById("thread-count").textContent = "已选 " + selectedIds.size + " 段";
+      document.getElementById("thread-delete").disabled = selectedIds.size === 0;
+    }
+
     function renderThreads(items, activeId) {
+      closeThreadMenu();
+      threadItems = items;
+      activeThread = activeId;
+      const alive = new Set(items.map((item) => item.id));
+      selectedIds = new Set([...selectedIds].filter((id) => alive.has(id)));
       threadsEl.innerHTML = "";
       let last = "";
       for (const item of items) {
@@ -326,13 +353,153 @@
           threadsEl.appendChild(label);
           last = group;
         }
+        const row = document.createElement("div");
+        row.className = item.id === activeId ? "thread-row on" : "thread-row";
+        row.dataset.id = String(item.id);
+        if (selectMode) {
+          const box = document.createElement("input");
+          box.type = "checkbox";
+          box.className = "thread-check";
+          box.checked = selectedIds.has(item.id);
+          box.addEventListener("click", (event) => event.stopPropagation());
+          box.addEventListener("change", () => {
+            if (box.checked) selectedIds.add(item.id);
+            else selectedIds.delete(item.id);
+            paintThreadBar();
+          });
+          row.appendChild(box);
+        }
         const button = document.createElement("button");
         button.type = "button";
-        button.className = item.id === activeId ? "thread on" : "thread";
+        button.className = "thread";
         button.textContent = item.title || "新对话";
-        button.addEventListener("click", () => openThread(item.id));
-        threadsEl.appendChild(button);
+        button.addEventListener("click", () => {
+          if (selectMode) {
+            if (selectedIds.has(item.id)) selectedIds.delete(item.id);
+            else selectedIds.add(item.id);
+            renderThreads(threadItems, activeThread);
+            return;
+          }
+          openThread(item.id);
+        });
+        row.appendChild(button);
+        if (!selectMode) {
+          const more = document.createElement("button");
+          more.type = "button";
+          more.className = "thread-more";
+          more.textContent = "···";
+          more.setAttribute("aria-label", "对话操作");
+          more.addEventListener("click", (event) => {
+            event.stopPropagation();
+            openThreadMenu(more, item);
+          });
+          row.appendChild(more);
+        }
+        threadsEl.appendChild(row);
       }
+      paintThreadBar();
+    }
+
+    function openThreadMenu(anchor, item) {
+      closeThreadMenu();
+      const menu = document.createElement("div");
+      menu.className = "thread-menu";
+      const rect = anchor.getBoundingClientRect();
+      menu.style.top = rect.bottom + 4 + "px";
+      menu.style.left = Math.max(8, rect.right - 132) + "px";
+      const actions = [
+        ["重命名", () => startRename(item)],
+        ["选择", () => beginSelect(item.id)],
+        ["删除", () => removeThreads([item.id]), true],
+      ];
+      for (const [label, action, danger] of actions) {
+        const choice = document.createElement("button");
+        choice.type = "button";
+        choice.textContent = label;
+        if (danger) choice.className = "danger";
+        choice.addEventListener("click", (event) => {
+          event.stopPropagation();
+          closeThreadMenu();
+          action();
+        });
+        menu.appendChild(choice);
+      }
+      document.body.appendChild(menu);
+      threadMenu = menu;
+    }
+
+    function beginSelect(id) {
+      selectMode = true;
+      selectedIds = new Set([id]);
+      renderThreads(threadItems, activeThread);
+    }
+
+    function endSelect() {
+      selectMode = false;
+      selectedIds = new Set();
+      renderThreads(threadItems, activeThread);
+    }
+
+    function startRename(item) {
+      const row = threadsEl.querySelector('[data-id="' + item.id + '"]');
+      if (!row) return;
+      const title = row.querySelector(".thread");
+      const input = document.createElement("input");
+      input.className = "thread-rename";
+      input.maxLength = 40;
+      input.value = item.title || "新对话";
+      title.replaceWith(input);
+      input.focus();
+      input.select();
+      let finished = false;
+      async function commit() {
+        if (finished) return;
+        finished = true;
+        const next = input.value.trim();
+        if (!next || next === (item.title || "新对话")) {
+          renderThreads(threadItems, activeThread);
+          return;
+        }
+        const res = await fetch("/api/conversations/rename", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: item.id, title: next }),
+        });
+        if (res.status === 401) { location.href = "/login"; return; }
+        if (!res.ok) {
+          renderThreads(threadItems, activeThread);
+          return;
+        }
+        showThread(await res.json());
+      }
+      input.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          commit();
+        } else if (event.key === "Escape") {
+          finished = true;
+          renderThreads(threadItems, activeThread);
+        }
+      });
+      input.addEventListener("blur", () => commit());
+    }
+
+    async function removeThreads(ids) {
+      if (sending || !ids.length) return;
+      const text = ids.length === 1
+        ? "删除这段对话？里面的消息和文件会一起去掉。"
+        : "删除选中的 " + ids.length + " 段对话？里面的消息和文件会一起去掉。";
+      if (!window.confirm(text)) return;
+      const res = await fetch("/api/conversations/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids }),
+      });
+      if (res.status === 401) { location.href = "/login"; return; }
+      if (!res.ok) return;
+      selectMode = false;
+      selectedIds = new Set();
+      showThread(await res.json());
     }
 
     function renderUploads(items) {
@@ -805,6 +972,13 @@
       if (!res.ok) return;
       showThread(await res.json());
     }
+
+    document.addEventListener("click", closeThreadMenu);
+    threadsEl.addEventListener("scroll", closeThreadMenu);
+    document.getElementById("thread-delete").addEventListener("click", () => {
+      removeThreads([...selectedIds]);
+    });
+    document.getElementById("thread-cancel").addEventListener("click", endSelect);
 
     document.getElementById("new-chat").addEventListener("click", async () => {
       if (sending) return;

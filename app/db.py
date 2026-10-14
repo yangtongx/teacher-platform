@@ -555,6 +555,75 @@ def open_conversation(user_id: int, identity: str, conversation: int) -> bool:
     return True
 
 
+def rename_conversation(user_id: int, conversation_id: int, title: str) -> bool:
+    cleaned = " ".join(str(title or "").split())[:40]
+    if not cleaned:
+        return False
+    with connect() as conn:
+        cursor = conn.execute(
+            "UPDATE conversations SET title = ? WHERE id = ? AND user_id = ?",
+            (cleaned, conversation_id, user_id),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def delete_conversations(user_id: int, conversation_ids: list[int]) -> int:
+    """删掉这位老师自己的对话，连同消息、上传、试卷文件和专家记忆。"""
+    owned_ids: list[int] = []
+    seen: set[int] = set()
+    for item in conversation_ids:
+        try:
+            number = int(item)
+        except (TypeError, ValueError):
+            continue
+        if number not in seen:
+            seen.add(number)
+            owned_ids.append(number)
+    if not owned_ids:
+        return 0
+    with connect() as conn:
+        marks = ",".join("?" * len(owned_ids))
+        rows = conn.execute(
+            f"SELECT id FROM conversations WHERE user_id = ? AND id IN ({marks})",
+            (user_id, *owned_ids),
+        ).fetchall()
+        found = [int(row["id"]) for row in rows]
+        if not found:
+            return 0
+        slots = ",".join("?" * len(found))
+        tokens = conn.execute(
+            f"""
+            SELECT d.token FROM documents d
+            JOIN messages m ON m.id = d.message_id
+            WHERE m.conversation_id IN ({slots})
+            """,
+            found,
+        ).fetchall()
+        for token in tokens:
+            path = DATA_DIR / "docs" / f"{token['token']}.docx"
+            path.unlink(missing_ok=True)
+        conn.execute(
+            f"""
+            DELETE FROM documents WHERE message_id IN (
+              SELECT id FROM messages WHERE conversation_id IN ({slots})
+            )
+            """,
+            found,
+        )
+        conn.execute(f"DELETE FROM messages WHERE conversation_id IN ({slots})", found)
+        conn.execute(f"DELETE FROM uploads WHERE conversation_id IN ({slots})", found)
+        conn.execute(f"DELETE FROM agent_sessions WHERE conversation_id IN ({slots})", found)
+        conn.execute(f"DELETE FROM exams WHERE conversation_id IN ({slots})", found)
+        conn.execute(f"DELETE FROM focus WHERE conversation_id IN ({slots})", found)
+        cursor = conn.execute(
+            f"DELETE FROM conversations WHERE user_id = ? AND id IN ({slots})",
+            (user_id, *found),
+        )
+        conn.commit()
+        return int(cursor.rowcount)
+
+
 def _unique_files(files: list) -> list[dict]:
     seen = set()
     result = []

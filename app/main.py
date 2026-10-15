@@ -34,7 +34,7 @@ from app.config import (
 )
 from app.corpus import account_scope_ids, catalog_choices, known_scope_ids, lesson_excerpts, textbook_notice
 from app.docx import document_name, write_docx
-from app.extract import extract_text, safe_filename
+from app.extract import OCR_NOTE, extract_text, safe_filename
 from app.llm import ModelError, stream_reply
 
 MAX_UPLOAD_BYTES = 8 * 1024 * 1024
@@ -274,13 +274,20 @@ def download_word(token: str, request: Request):
         return JSONResponse({"error": "未登录"}, status_code=401)
     user, _ = session
     document = db.document_for_user(int(user["id"]), token)
-    path = DATA_DIR / "docs" / f"{token}.docx"
+    suffix = Path(str(document["filename"] if document else "")).suffix.lower()
+    if suffix not in {".docx", ".pptx"}:
+        suffix = ".docx"
+    path = DATA_DIR / "docs" / f"{token}{suffix}"
     if document is None or not path.is_file():
         return JSONResponse({"error": "文件不存在"}, status_code=404)
     db.audit(int(user["id"]), "download", document["filename"])
+    kinds = {
+        ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    }
     return FileResponse(
         path,
-        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        media_type=kinds[suffix],
         filename=document["filename"],
     )
 
@@ -381,14 +388,31 @@ async def upload_document(request: Request):
         return JSONResponse({"error": "文件超过 8MB"}, status_code=400)
     try:
         filename = safe_filename(getattr(upload, "filename", "") or "")
-        text = extract_text(filename, data)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     user_id = int(user["id"])
     if db.upload_count(user_id, THREAD) >= MAX_UPLOADS:
         return JSONResponse({"error": "这段对话最多 8 个文档"}, status_code=400)
+    if Path(filename).suffix.lower() in {".pptx", ".potx"}:
+        try:
+            from app.ppt_style import store_pptx
+
+            store_pptx(user_id, filename, data)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        return {
+            "uploads": db.list_uploads(user_id, THREAD),
+            "notice": "这份课件只用来记样式，不会把里面的旧内容抄进新课件。",
+        }
+    try:
+        text = extract_text(filename, data)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
     db.add_upload(user_id, THREAD, filename, text)
-    return {"uploads": db.list_uploads(user_id, THREAD)}
+    payload = {"uploads": db.list_uploads(user_id, THREAD)}
+    if text.startswith(OCR_NOTE):
+        payload["notice"] = "图片或扫描页已经识别成文字，请核对后再用。"
+    return payload
 
 
 @app.post("/api/uploads/delete")

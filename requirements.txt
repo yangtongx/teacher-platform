@@ -3,6 +3,14 @@ python-multipart==0.0.20
 uvicorn==0.34.0
 httpx==0.28.1
 python-docx==1.1.2
+python-pptx==1.0.2
 pypdf==5.1.0
+pymupdf==1.26.4
+pillow==12.3.0
+rapidocr==3.10.0
+rapid-layout==1.2.1
+onnxruntime==1.20.1
+transformers==4.48.3
+torch==2.6.0
 # AgentScope 2.0.9 需要 Python 3.11 或更高版本
 agentscope==2.0.9

@@ -43,7 +43,7 @@
             <div class="composer-actions">
               <label class="icon-btn file" title="上传文档">
                 <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" d="M8.5 12.5 15 6a3.2 3.2 0 0 1 4.5 4.5l-8 8a4.2 4.2 0 0 1-6-6l7.2-7.2"/></svg>
-                <input id="file" type="file" accept=".txt,.md,.docx,.pdf,text/plain" hidden>
+                <input id="file" type="file" accept=".txt,.md,.docx,.pdf,.pptx,.potx,.jpg,.jpeg,.png,.webp,text/plain,image/jpeg,image/png,image/webp" hidden>
               </label>
               <button id="send" class="send" type="submit" aria-label="发送" title="Enter 发送，Shift+Enter 换行">
                 <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M12 19a1 1 0 0 1-1-1V8.4l-3.3 3.3a1 1 0 1 1-1.4-1.4l5-5a1 1 0 0 1 1.4 0l5 5a1 1 0 0 1-1.4 1.4L13 8.4V18a1 1 0 0 1-1 1z"/></svg>
@@ -313,7 +313,7 @@
       if (!items.length) {
         const empty = document.createElement("div");
         empty.className = "hello";
-        empty.innerHTML = "<h1>今天想处理什么？</h1><p>可以出分层作业、写教案和说课稿，或给家长写一段能直接发的短消息。</p>";
+        empty.innerHTML = "<h1>今天想处理什么？</h1><p>可以出分层作业、写教案和课件，或给家长写一段能直接发的短消息。</p>";
         messagesEl.appendChild(empty);
         return;
       }
@@ -1030,13 +1030,21 @@
       if (!file) return;
       const body = new FormData();
       body.append("file", file);
-      const res = await fetch("/api/uploads", { method: "POST", body });
-      const data = await res.json();
-      if (!res.ok) {
-        alert(data.error || "上传失败");
-        return;
+      const previous = inputEl.placeholder;
+      inputEl.placeholder = "正在读取文档…";
+      let data;
+      try {
+        const res = await fetch("/api/uploads", { method: "POST", body });
+        data = await res.json();
+        if (!res.ok) {
+          alert(data.error || "上传失败");
+          return;
+        }
+      } finally {
+        inputEl.placeholder = previous;
       }
       renderUploads(data.uploads || []);
+      if (data.notice) alert(data.notice);
     });
 
     // 回车发送。Shift+回车换行。中文输入法选词时的回车不发送。

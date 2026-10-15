@@ -265,6 +265,103 @@ class SaveMistakes(_TeacherTool):
         return _chunk(f"已记下 {saved} 条易错点。{tail}")
 
 
+class PptStyle(_TeacherTool):
+    name = "ppt_style"
+    description = "做课件前先调用。它会说直接用科目样式、先问老师一次，或只确认上一回的样式。"
+    input_schema = {"type": "object", "properties": {}}
+    is_read_only = True
+
+    async def call(self, **_extra) -> object:
+        from app.ppt_style import describe_style
+
+        turn = _teacher_lookup()
+        if not turn or turn.get("identity") != "lesson":
+            return _chunk("课件请换到教案设计与出题专家。")
+        return _chunk(describe_style(turn["user"], int(turn["conversation_id"])))
+
+
+class ExportPpt(_TeacherTool):
+    name = "export_ppt"
+    description = (
+        "把一课时课件写成 PPT。"
+        "slides 每一页含 role、title、bullets、source。"
+        "role 只能是课题与目标、导入、新知、例题、练习、小结、作业。"
+        "source 只能是教案、课本或要求。新知不能只写要求。"
+        "每页最多 5 条短句。第一页必须是课题与目标，并且要有小结和作业。"
+        "use 填 keep、subject 或 upload。subject 只填语文、数学、英语或通用，留空则用老师账号上的科目。"
+    )
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string", "description": "课题，用来做文件名"},
+            "use": {
+                "type": "string",
+                "description": "keep 沿用上次，subject 用科目样式，upload 用老师刚上传的课件",
+            },
+            "subject": {
+                "type": "string",
+                "description": "语文、数学、英语或通用。留空则用账号上的科目",
+            },
+            "slides": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "role": {"type": "string"},
+                        "title": {"type": "string"},
+                        "bullets": {"type": "array", "items": {"type": "string"}},
+                        "source": {"type": "string", "description": "教案、课本或要求"},
+                        "notes": {"type": "string", "description": "只给老师看的备注，可空"},
+                    },
+                    "required": ["role", "title", "bullets", "source"],
+                },
+            },
+        },
+        "required": ["title", "slides"],
+    }
+    is_read_only = False
+
+    async def call(self, title: str = "", slides=None, use: str = "", subject: str = "", **_extra) -> object:
+        from app.ppt import write_ppt
+        from app.ppt_style import StyleNeeded, prepare_export
+
+        turn = _teacher_lookup()
+        if not turn or turn.get("identity") != "lesson":
+            return _chunk("课件请换到教案设计与出题专家。")
+        items = slides if isinstance(slides, list) else []
+        try:
+            template, subject_name = prepare_export(
+                turn["user"],
+                int(turn["conversation_id"]),
+                use,
+                subject,
+            )
+        except StyleNeeded as exc:
+            return _chunk(str(exc))
+        tries = int(turn.get("ppt_tries") or 0) + 1
+        turn["ppt_tries"] = tries
+        try:
+            files = [
+                write_ppt(
+                    turn["user"],
+                    int(turn["conversation_id"]),
+                    title,
+                    items,
+                    template,
+                    subject_name,
+                )
+            ]
+        except ValueError as exc:
+            if tries >= 2:
+                return _chunk(f"已经改过一次仍不能导出。不要再调用 export_ppt。告诉老师：{exc}")
+            return _chunk(str(exc))
+        _publish(turn, files)
+        lines = ["课件已生成，只把文件名和链接告诉老师，不要再粘贴每页内容。"]
+        for item in files:
+            lines.append(f"{item['name']} {item['url']}")
+        return _chunk("\n".join(lines))
+
+
 class ReviewParentNote(_TeacherTool):
     name = "review_parent_note"
     description = "检查给家长的文字里有没有刺激人或拿学生做比较的说法。成文前先调用。"
@@ -304,6 +401,8 @@ def build_toolkit(identity: str):
         "search_textbooks": SearchTextbooks,
         "export_exam": ExportExam,
         "export_materials": ExportMaterials,
+        "ppt_style": PptStyle,
+        "export_ppt": ExportPpt,
         "save_mistakes": SaveMistakes,
         "review_parent_note": ReviewParentNote,
     }

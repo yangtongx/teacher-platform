@@ -11,6 +11,7 @@ import json
 import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from app.auth import hash_password, new_session_token
 from app.config import (
@@ -38,7 +39,9 @@ CREATE TABLE IF NOT EXISTS users (
   subject TEXT,
   textbook_version TEXT,
   grade TEXT,
-  assigned_scopes TEXT
+  assigned_scopes TEXT,
+  ppt_style TEXT,
+  ppt_subject TEXT
 );
 CREATE TABLE IF NOT EXISTS sessions (
   token TEXT PRIMARY KEY,
@@ -129,6 +132,14 @@ CREATE TABLE IF NOT EXISTS mistake_notes (
   detail TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS ppt_uploads (
+  id INTEGER PRIMARY KEY,
+  upload_id INTEGER NOT NULL,
+  user_id INTEGER NOT NULL,
+  conversation_id INTEGER NOT NULL,
+  stored TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
 """
 
 USERNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{1,31}$")
@@ -158,6 +169,8 @@ USER_EXTRA_COLUMNS = (
     ("textbook_version", "TEXT"),
     ("grade", "TEXT"),
     ("assigned_scopes", "TEXT"),
+    ("ppt_style", "TEXT"),
+    ("ppt_subject", "TEXT"),
 )
 
 
@@ -218,6 +231,13 @@ def _ensure_column(conn: sqlite3.Connection, table: str, name: str, typedef: str
             raise
 
 
+def remove_document_file(token: str) -> None:
+    """下载文件按原后缀存放。删的时候 Word 和课件都试一次。"""
+    folder = DATA_DIR / "docs"
+    for suffix in (".docx", ".pptx"):
+        (folder / f"{token}{suffix}").unlink(missing_ok=True)
+
+
 def _purge_expired_documents(conn: sqlite3.Connection) -> None:
     now = iso(utcnow())
     rows = conn.execute(
@@ -225,8 +245,7 @@ def _purge_expired_documents(conn: sqlite3.Connection) -> None:
         (now,),
     ).fetchall()
     for row in rows:
-        path = DATA_DIR / "docs" / f"{row['token']}.docx"
-        path.unlink(missing_ok=True)
+        remove_document_file(row["token"])
         conn.execute("DELETE FROM documents WHERE token = ?", (row["token"],))
 
 
@@ -618,8 +637,7 @@ def delete_conversations(user_id: int, conversation_ids: list[int]) -> int:
             found,
         ).fetchall()
         for token in tokens:
-            path = DATA_DIR / "docs" / f"{token['token']}.docx"
-            path.unlink(missing_ok=True)
+            remove_document_file(token["token"])
         conn.execute(
             f"""
             DELETE FROM documents WHERE message_id IN (
@@ -629,6 +647,13 @@ def delete_conversations(user_id: int, conversation_ids: list[int]) -> int:
             found,
         )
         conn.execute(f"DELETE FROM messages WHERE conversation_id IN ({slots})", found)
+        ppt_rows = conn.execute(
+            f"SELECT stored FROM ppt_uploads WHERE conversation_id IN ({slots})",
+            found,
+        ).fetchall()
+        for row in ppt_rows:
+            _remove_ppt_upload_file(row["stored"])
+        conn.execute(f"DELETE FROM ppt_uploads WHERE conversation_id IN ({slots})", found)
         conn.execute(f"DELETE FROM uploads WHERE conversation_id IN ({slots})", found)
         conn.execute(f"DELETE FROM agent_sessions WHERE conversation_id IN ({slots})", found)
         conn.execute(f"DELETE FROM exams WHERE conversation_id IN ({slots})", found)
@@ -825,12 +850,85 @@ def add_upload(user_id: int, identity: str, filename: str, text: str) -> int:
 
 def delete_upload(user_id: int, upload_id: int) -> bool:
     with connect() as conn:
+        rows = conn.execute(
+            "SELECT stored FROM ppt_uploads WHERE upload_id = ? AND user_id = ?",
+            (upload_id, user_id),
+        ).fetchall()
+        for row in rows:
+            _remove_ppt_upload_file(row["stored"])
+        conn.execute(
+            "DELETE FROM ppt_uploads WHERE upload_id = ? AND user_id = ?",
+            (upload_id, user_id),
+        )
         cursor = conn.execute(
             "DELETE FROM uploads WHERE id = ? AND user_id = ?",
             (upload_id, user_id),
         )
         conn.commit()
         return cursor.rowcount > 0
+
+
+def remember_ppt_upload(user_id: int, upload_id: int, stored: str) -> None:
+    """记下这份课件文件的位置。库里只存文件名，不存目录。"""
+    now = iso(utcnow())
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT conversation_id FROM uploads WHERE id = ? AND user_id = ?",
+            (upload_id, user_id),
+        ).fetchone()
+        if row is None:
+            return
+        conn.execute(
+            """
+            INSERT INTO ppt_uploads (upload_id, user_id, conversation_id, stored, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (upload_id, user_id, int(row["conversation_id"]), Path(stored).name, now),
+        )
+        conn.commit()
+
+
+def latest_ppt_upload(user_id: int, conversation_id: int) -> str | None:
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT stored FROM ppt_uploads
+            WHERE user_id = ? AND conversation_id = ?
+            ORDER BY id DESC LIMIT 1
+            """,
+            (user_id, conversation_id),
+        ).fetchone()
+    if row is None:
+        return None
+    return str(row["stored"])
+
+
+def ppt_pref(user_id: int) -> dict | None:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT ppt_style, ppt_subject FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    style = str(row["ppt_style"] or "")
+    if style not in {"subject", "upload"}:
+        return None
+    return {"style": style, "subject": str(row["ppt_subject"] or "")}
+
+
+def set_ppt_pref(user_id: int, style: str, subject: str) -> None:
+    with connect() as conn:
+        conn.execute(
+            "UPDATE users SET ppt_style = ?, ppt_subject = ? WHERE id = ?",
+            (style, subject, user_id),
+        )
+        conn.commit()
+
+
+def _remove_ppt_upload_file(stored: str) -> None:
+    path = DATA_DIR / "ppt-uploads" / Path(str(stored or "")).name
+    path.unlink(missing_ok=True)
 
 
 def upload_context(

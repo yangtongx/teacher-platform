@@ -160,12 +160,246 @@ class HardeningTests(unittest.TestCase):
         finally:
             extract.MAX_UNCOMPRESSED = previous
 
+    def test_scanned_pdf_is_recognized_and_text_pdf_is_not(self):
+        from io import BytesIO
+
+        from pypdf import PdfWriter
+
+        from app import extract
+
+        writer = PdfWriter()
+        writer.add_blank_page(width=200, height=200)
+        writer.add_blank_page(width=200, height=200)
+        buffer = BytesIO()
+        writer.write(buffer)
+        scanned = buffer.getvalue()
+        seen = []
+
+        def fake_ocr(_data, index, _holder):
+            seen.append(index)
+            return "勾股定理" if index == 0 else ""
+
+        previous_ocr = extract._ocr_page
+        previous_limit = extract.MAX_OCR_PAGES
+        extract._ocr_page = fake_ocr
+        extract.MAX_OCR_PAGES = 1
+        try:
+            text = extract.extract_text("scan.pdf", scanned)
+            self.assertEqual(seen, [0])
+            self.assertTrue(text.startswith(extract.OCR_NOTE))
+            self.assertIn("勾股定理", text)
+            self.assertIn("只识别了前 1 页", text)
+            extract._ocr_page = lambda *_args: ""
+            with self.assertRaises(ValueError) as empty:
+                extract.extract_text("scan.pdf", scanned)
+            self.assertIn("没有识别出文字", str(empty.exception))
+        finally:
+            extract._ocr_page = previous_ocr
+            extract.MAX_OCR_PAGES = previous_limit
+
+        seen.clear()
+
+        def reject_ocr(*_args):
+            seen.append("called")
+            return "不该识别"
+
+        def text_pdf(message: str) -> bytes:
+            stream = f"BT /F1 18 Tf 36 120 Td ({message}) Tj ET\n".encode()
+            objects = [
+                b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+                b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+                b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 200] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n",
+                b"4 0 obj\n<< /Length %d >>\nstream\n" % len(stream) + stream + b"endstream\nendobj\n",
+                b"5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n",
+            ]
+            out = bytearray(b"%PDF-1.4\n")
+            offsets = [0]
+            for obj in objects:
+                offsets.append(len(out))
+                out.extend(obj)
+            xref = len(out)
+            out.extend(b"xref\n0 6\n0000000000 65535 f \n")
+            for offset in offsets[1:]:
+                out.extend(f"{offset:010d} 00000 n \n".encode())
+            out.extend(f"trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode())
+            return bytes(out)
+
+        extract._ocr_page = reject_ocr
+        try:
+            text = extract.extract_text(
+                "lesson.pdf",
+                text_pdf("Third unit reviews fractions before the lesson starts."),
+            )
+            self.assertIn("fractions", text)
+            self.assertNotIn(extract.OCR_NOTE, text)
+            self.assertEqual(seen, [])
+        finally:
+            extract._ocr_page = previous_ocr
+
+    def test_image_blocks_keep_column_order_and_repair_english(self):
+        from app.image_ocr import needs_english_repair, order_blocks
+
+        blocks = [
+            {"x0": 420, "y0": 40, "x1": 700, "y1": 80, "kind": "title"},
+            {"x0": 40, "y0": 120, "x1": 300, "y1": 180, "kind": "text"},
+            {"x0": 420, "y0": 120, "x1": 700, "y1": 180, "kind": "text"},
+            {"x0": 40, "y0": 40, "x1": 300, "y1": 80, "kind": "title"},
+            {"x0": 40, "y0": 200, "x1": 200, "y1": 280, "kind": "figure"},
+        ]
+        ordered = order_blocks(blocks, 760)
+        self.assertEqual([(item["x0"], item["y0"]) for item in ordered], [(40, 40), (40, 120), (420, 40), (420, 120)])
+        self.assertFalse(needs_english_repair("勾股定理的证明", 0.4))
+        self.assertTrue(needs_english_repair("fractions before class", 0.4))
+        self.assertFalse(needs_english_repair("fractions before class", 0.95))
+
+    def test_ppt_rejects_unsupported_knowledge_and_downloads(self):
+        from io import BytesIO
+
+        from fastapi.testclient import TestClient
+        from pptx import Presentation
+
+        from app.main import app
+        from app.ppt import review_slides, write_ppt
+
+        rejected = review_slides(
+            [
+                {"role": "课题与目标", "title": "分数", "bullets": ["认识几分之一"], "source": "教案"},
+                {"role": "新知", "title": "假分数", "bullets": ["分子大于分母"], "source": "要求"},
+                {"role": "小结", "title": "记住", "bullets": ["分数表示一份"], "source": "教案"},
+                {"role": "作业", "title": "练习", "bullets": ["做课本练习"], "source": "课本"},
+            ]
+        )
+        self.assertTrue(any("新知" in item for item in rejected))
+
+        slides = [
+            {"role": "课题与目标", "title": "认识分数", "bullets": ["能说出几分之一"], "source": "教案", "notes": "先看图"},
+            {"role": "导入", "title": "分月饼", "bullets": ["一块月饼平均分成四份"], "source": "要求"},
+            {"role": "新知", "title": "几分之一", "bullets": ["份数是分母"], "source": "课本"},
+            {"role": "小结", "title": "今天记住", "bullets": ["分母表示平均分成的份数"], "source": "教案"},
+            {"role": "作业", "title": "课后", "bullets": ["完成练习二"], "source": "课本"},
+        ]
+        db.init_db()
+        user = db.user_by_username("teacher")
+        conversation_id = db.conversation_id(user["id"], "lesson")
+        db.add_message(user["id"], "lesson", "user", "做课件")
+        saved = write_ppt(user, conversation_id, "认识分数", slides)
+        self.assertTrue(saved["name"].endswith("_课件.pptx"))
+        client = TestClient(app)
+        logged = client.post(
+            "/login",
+            data={"username": "teacher", "password": "test-password-1"},
+            follow_redirects=False,
+        )
+        self.assertEqual(logged.status_code, 303)
+        downloaded = client.get(saved["url"])
+        self.assertEqual(downloaded.status_code, 200)
+        presentation = Presentation(BytesIO(downloaded.content))
+        self.assertEqual(len(presentation.slides), 5)
+        cover = "\n".join(
+            shape.text_frame.text
+            for shape in presentation.slides[0].shapes
+            if getattr(shape, "has_text_frame", False)
+        )
+        self.assertIn("认识分数", cover)
+        self.assertNotIn("Your lesson title", cover)
+        self.assertNotIn("Learning objective", cover)
+        from pptx.enum.shapes import MSO_SHAPE_TYPE
+
+        self.assertTrue(
+            any(shape.shape_type == MSO_SHAPE_TYPE.PICTURE for shape in presentation.slides[0].shapes)
+        )
+
+    def test_ppt_style_stays_on_the_account_and_drops_old_text(self):
+        from io import BytesIO
+
+        from pptx import Presentation
+        from pptx.util import Inches, Pt
+
+        from app.ppt import write_ppt
+        from app.ppt_style import StyleNeeded, describe_style, prepare_export, store_pptx
+
+        db.init_db()
+        user = db.user_by_username("teacher")
+        conversation_id = db.conversation_id(int(user["id"]), "main")
+        db.add_message(int(user["id"]), "main", "user", "做课件")
+        self.assertIn("直接用", describe_style(user, conversation_id))
+        self.assertNotIn("用 AI 自己的", describe_style(user, conversation_id))
+        template, subject = prepare_export(user, conversation_id, "subject", "数学")
+        self.assertEqual(subject, "数学")
+        self.assertIn("slate", template.name)
+        self.assertIn("请确认", describe_style(user, conversation_id))
+        with self.assertRaises(StyleNeeded) as caught:
+            prepare_export(user, conversation_id, "", "")
+        self.assertIn("仍用你上次的课件样式", str(caught.exception))
+        kept, _name = prepare_export(user, conversation_id, "keep", "")
+        self.assertEqual(kept, template)
+        self.assertIn("请确认", describe_style(user, 0))
+
+        with db.connect() as conn:
+            conn.execute(
+                "UPDATE users SET ppt_style = NULL, ppt_subject = NULL WHERE id = ?",
+                (int(user["id"]),),
+            )
+            conn.commit()
+        user = db.user_by_username("teacher")
+        deck = Presentation()
+        deck.slide_width = Inches(13.333)
+        deck.slide_height = Inches(7.5)
+        blank = deck.slide_layouts[6]
+        cover = deck.slides.add_slide(blank)
+        title = cover.shapes.add_textbox(Inches(1), Inches(1), Inches(8), Inches(1))
+        run = title.text_frame.paragraphs[0].add_run()
+        run.text = "旧课文不要出现"
+        run.font.size = Pt(40)
+        body = deck.slides.add_slide(blank)
+        heading = body.shapes.add_textbox(Inches(1), Inches(0.6), Inches(8), Inches(1))
+        heading_run = heading.text_frame.paragraphs[0].add_run()
+        heading_run.text = "旧标题"
+        heading_run.font.size = Pt(32)
+        point = body.shapes.add_textbox(Inches(1), Inches(2), Inches(8), Inches(1))
+        point_run = point.text_frame.paragraphs[0].add_run()
+        point_run.text = "旧要点"
+        point_run.font.size = Pt(18)
+        payload = BytesIO()
+        deck.save(payload)
+        store_pptx(int(user["id"]), "旧课件.pptx", payload.getvalue())
+        self.assertIn("请选择", describe_style(user, conversation_id))
+        self.assertIn("用我刚上传的那份课件样式", describe_style(user, conversation_id))
+        uploaded, _subject = prepare_export(user, conversation_id, "upload", "")
+        slides = [
+            {"role": "课题与目标", "title": "认识分数", "bullets": ["能说出几分之一"], "source": "教案"},
+            {"role": "导入", "title": "分月饼", "bullets": ["平均分成四份"], "source": "要求"},
+            {"role": "新知", "title": "几分之一", "bullets": ["份数是分母"], "source": "课本"},
+            {"role": "小结", "title": "今天记住", "bullets": ["分母是平均分的份数"], "source": "教案"},
+            {"role": "作业", "title": "课后", "bullets": ["完成练习二"], "source": "课本"},
+        ]
+        saved = write_ppt(user, conversation_id, "认识分数", slides, uploaded, "数学")
+        from app.config import DATA_DIR
+
+        token = saved["url"].rsplit("/", 1)[-1]
+        opened = Presentation(str(DATA_DIR / "docs" / f"{token}.pptx"))
+        text = "\n".join(
+            shape.text_frame.text
+            for slide in opened.slides
+            for shape in slide.shapes
+            if getattr(shape, "has_text_frame", False)
+        )
+        self.assertIn("认识分数", text)
+        self.assertIn("几分之一", text)
+        self.assertNotIn("旧课文不要出现", text)
+        self.assertNotIn("旧要点", text)
+        with self.assertRaises(ValueError):
+            store_pptx(int(user["id"]), "扫描.pdf", b"%PDF-1.4")
+
     def test_lesson_skills_leave_out_cloud_and_feishu(self):
         from app.agents.registry import skill_directories, tool_call_allowed
         names = [path.name for path in skill_directories("lesson")]
         self.assertEqual(names, ["exam-generator", "markdown-to-exam-docx"])
         self.assertEqual(skill_directories("office"), [])
-        self.assertTrue(tool_call_allowed("export_exam", "lesson"))
+        self.assertTrue(tool_call_allowed("export_ppt", "lesson"))
+        self.assertFalse(tool_call_allowed("export_ppt", "office"))
+        self.assertTrue(tool_call_allowed("ppt_style", "lesson"))
+        self.assertFalse(tool_call_allowed("ppt_style", "office"))
         self.assertFalse(tool_call_allowed("export_exam", "office"))
         self.assertTrue(tool_call_allowed("export_materials", "office"))
         self.assertTrue(tool_call_allowed("save_mistakes", "lesson"))

@@ -1,3 +1,5 @@
+"""老师账号上的教材范围。检索只能落在该老师被分配的学段、学科和版本里。"""
+
 from __future__ import annotations
 
 import json

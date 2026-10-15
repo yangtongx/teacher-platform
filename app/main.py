@@ -1,3 +1,11 @@
+"""教师助手的 HTTP 入口。
+
+页面、登录和对话接口都在这里。老师发来的话不在这里写回复，
+交给 app.agents.conductor，由它分给出题专家或办公助手。
+会改数据的请求先核对来源：退出时浏览器可能把 Origin 写成 null，
+同源请求仍应回到登录页，而不是报「请求来源不对」。
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -118,10 +126,12 @@ def startup() -> None:
 
 
 def current(request: Request):
+    """返回会话令牌，以及（用户, 当前身份）。未登录时身份为空。"""
     token = request.cookies.get(SESSION_COOKIE, "")
     return token, db.session_user(token)
 
 
+# 登录页和健康检查。容器只探 /healthz，不走登录。
 @app.get("/healthz")
 def healthz() -> dict:
     return {"ok": True}
@@ -189,6 +199,7 @@ def logout(request: Request):
     return response
 
 
+# 当前对话、消息和教材提示。聊天走 conductor，不在这个文件里生成正文。
 @app.get("/api/state")
 def state(request: Request):
     _, session = current(request)
@@ -295,6 +306,7 @@ async def change_password(request: Request):
     return response
 
 
+# 左侧对话：新建、打开、改名、删除。删除时会清掉消息和已生成的文件。
 @app.post("/api/conversations")
 def new_conversation(request: Request):
     _, session = current(request)
@@ -395,6 +407,7 @@ async def remove_upload(request: Request):
     return {"uploads": db.list_uploads(int(user["id"]), THREAD)}
 
 
+# 管理员维护教师账号，以及按教材范围勾选这位老师能检索的书。
 @app.get("/accounts")
 def accounts_page(request: Request):
     _, session = current(request)

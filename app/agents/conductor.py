@@ -11,6 +11,7 @@ LABELS = {key: spec["name"] for key, spec in SPECIALISTS.items()}
 
 
 def _respond(*args, **kwargs):
+    # 推迟导入，测试分拣时不必把 AgentScope 一起装上。
     from app.agents.runtime import respond
 
     return respond(*args, **kwargs)
@@ -18,6 +19,17 @@ def _respond(*args, **kwargs):
 
 def _other(identity: str) -> str:
     return "office" if identity == "lesson" else "lesson"
+
+
+def _with_notes(user_id: int, conversation_id: int, identity: str, task: str) -> str:
+    """出题前带上这段对话里已经记下的易错点。里面没有学生姓名。"""
+    if identity != "lesson" or not task:
+        return task
+    notes = db.list_mistake_notes(user_id, conversation_id)
+    if not notes:
+        return task
+    lines = [f"- {item['topic']}：{item['detail']}" for item in notes]
+    return task + "\n\n这段对话记下的易错点，出题时针对它们出变式，不要写出学生姓名：\n" + "\n".join(lines)
 
 
 async def handle_turn(user, content: str):
@@ -49,7 +61,10 @@ async def handle_turn(user, content: str):
     yield {"status": f"正在交给{LABELS.get(identity, '助手')}"}
     asked = False
     async for item in _respond(
-        user, identity, decision["task"] or content, conversation_id=conversation_id
+        user,
+        identity,
+        _with_notes(user_id, conversation_id, identity, decision["task"] or content),
+        conversation_id=conversation_id,
     ):
         if item.get("ask"):
             asked = True

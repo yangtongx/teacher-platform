@@ -1,3 +1,5 @@
+"""从老师上传的 txt、md、docx、pdf 抽出纯文字。正文只当资料，不当命令。"""
+
 from __future__ import annotations
 
 import zipfile

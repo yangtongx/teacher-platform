@@ -1,3 +1,10 @@
+"""老师账号、对话和专家记忆都在这一份 SQLite 里。
+
+conversations 是老师左侧看到的对话。messages 挂在某一段对话上。
+agent_sessions 按（对话, 身份）分开保存两个专家的长期记忆。
+documents 记录可下载的 Word，过期后连文件一起删。
+"""
+
 from __future__ import annotations
 
 import json
@@ -114,6 +121,14 @@ CREATE TABLE IF NOT EXISTS rate_events (
   bucket TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS mistake_notes (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL,
+  conversation_id INTEGER NOT NULL,
+  topic TEXT NOT NULL,
+  detail TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
 """
 
 USERNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{1,31}$")
@@ -159,6 +174,8 @@ def init_db() -> None:
         _migrate_agent_sessions(conn)
         _ensure_column(conn, "documents", "expires_at", "TEXT")
         _ensure_column(conn, "messages", "files_json", "TEXT")
+        _ensure_column(conn, "exams", "blueprint_token", "TEXT")
+        _ensure_column(conn, "exams", "blueprint_name", "TEXT")
         conn.execute(
             """
             UPDATE documents
@@ -615,6 +632,7 @@ def delete_conversations(user_id: int, conversation_ids: list[int]) -> int:
         conn.execute(f"DELETE FROM uploads WHERE conversation_id IN ({slots})", found)
         conn.execute(f"DELETE FROM agent_sessions WHERE conversation_id IN ({slots})", found)
         conn.execute(f"DELETE FROM exams WHERE conversation_id IN ({slots})", found)
+        conn.execute(f"DELETE FROM mistake_notes WHERE conversation_id IN ({slots})", found)
         conn.execute(f"DELETE FROM focus WHERE conversation_id IN ({slots})", found)
         cursor = conn.execute(
             f"DELETE FROM conversations WHERE user_id = ? AND id IN ({slots})",
@@ -1129,16 +1147,27 @@ def finish_exam(
     paper_name: str,
     answer_token: str,
     answer_name: str,
+    blueprint_token: str = "",
+    blueprint_name: str = "",
 ) -> None:
     with connect() as conn:
         conn.execute(
             """
             UPDATE exams
             SET status = 'done', error = NULL,
-                paper_token = ?, paper_name = ?, answer_token = ?, answer_name = ?
+                paper_token = ?, paper_name = ?, answer_token = ?, answer_name = ?,
+                blueprint_token = ?, blueprint_name = ?
             WHERE id = ?
             """,
-            (paper_token, paper_name, answer_token, answer_name, exam_id),
+            (
+                paper_token,
+                paper_name,
+                answer_token,
+                answer_name,
+                blueprint_token,
+                blueprint_name,
+                exam_id,
+            ),
         )
         conn.commit()
 
@@ -1185,6 +1214,82 @@ def rate_hit(bucket: str) -> None:
         conn.commit()
 
 
+def list_mistake_notes(user_id: int, conversation_id: int) -> list[dict]:
+    """这段对话里的易错点。只保留知识点和错误类型。"""
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT topic, detail FROM mistake_notes
+            WHERE user_id = ? AND conversation_id = ?
+            ORDER BY id
+            """,
+            (user_id, conversation_id),
+        ).fetchall()
+    return [{"topic": row["topic"], "detail": row["detail"]} for row in rows]
+
+
+def save_mistake_notes(user_id: int, conversation_id: int, notes: list[dict]) -> int:
+    """同一知识点再记一次时覆盖原来的说明。一段对话最多留 20 条。"""
+    from app.mistakes import personal_reason
+
+    owned = conversation_owner(conversation_id)
+    if owned is None or int(owned["user_id"]) != int(user_id):
+        return 0
+    cleaned = []
+    for item in notes:
+        if not isinstance(item, dict):
+            continue
+        topic = " ".join(str(item.get("topic") or "").split())[:40]
+        detail = " ".join(str(item.get("detail") or "").split())[:120]
+        if not topic or not detail:
+            continue
+        if personal_reason(f"{topic} {detail}"):
+            continue
+        cleaned.append((topic, detail))
+    if not cleaned:
+        return 0
+    now = iso(utcnow())
+    with connect() as conn:
+        for topic, detail in cleaned:
+            existing = conn.execute(
+                """
+                SELECT id FROM mistake_notes
+                WHERE user_id = ? AND conversation_id = ? AND topic = ?
+                """,
+                (user_id, conversation_id, topic),
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    "UPDATE mistake_notes SET detail = ?, created_at = ? WHERE id = ?",
+                    (detail, now, existing["id"]),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO mistake_notes
+                      (user_id, conversation_id, topic, detail, created_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (user_id, conversation_id, topic, detail, now),
+                )
+        conn.execute(
+            """
+            DELETE FROM mistake_notes
+            WHERE user_id = ? AND conversation_id = ?
+              AND id NOT IN (
+                SELECT id FROM mistake_notes
+                WHERE user_id = ? AND conversation_id = ?
+                ORDER BY id DESC
+                LIMIT 20
+              )
+            """,
+            (user_id, conversation_id, user_id, conversation_id),
+        )
+        conn.commit()
+    return len(cleaned)
+
+
+# 两个专家各自的记忆。同一段对话里，出题和办公互不覆盖。
 def load_agent_session(
     user_id: int, conversation_id: int, identity: str | None = None
 ) -> sqlite3.Row | None:

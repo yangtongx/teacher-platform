@@ -351,6 +351,9 @@ def _tool_status(name: str) -> str:
         "list_textbooks": "正在查看教材",
         "search_textbooks": "正在检索教材",
         "export_exam": "正在生成试卷",
+        "export_materials": "正在整理文稿",
+        "save_mistakes": "正在记下易错点",
+        "review_parent_note": "正在看措辞",
         "AskUser": "正在整理问题",
     }
     if name in labels:

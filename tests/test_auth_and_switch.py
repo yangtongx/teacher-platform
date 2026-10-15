@@ -387,7 +387,8 @@ class ExamFlowTests(unittest.TestCase):
             "【答案】B\n【难度】易\n【解析】√2 是无理数。\n"
         )
         files = write_exam_files(user, conversation_id, student, answer)
-        self.assertEqual(len(files), 2)
+        self.assertEqual(len(files), 3)
+        self.assertIn("双向细目表", files[2]["name"])
         client = TestClient(app)
         logged = client.post(
             "/login",
@@ -399,11 +400,71 @@ class ExamFlowTests(unittest.TestCase):
         answer_file = client.get(files[1]["url"])
         self.assertEqual(paper.status_code, 200)
         self.assertEqual(answer_file.status_code, 200)
-        paper_text = "\n".join(p.text for p in Document(BytesIO(paper.content)).paragraphs)
-        answer_text = "\n".join(p.text for p in Document(BytesIO(answer_file.content)).paragraphs)
+        def doc_text(payload: bytes) -> str:
+            document = Document(BytesIO(payload))
+            bits = [p.text for p in document.paragraphs]
+            for table in document.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        bits.append(cell.text)
+            return "\n".join(bits)
+
+        paper_text = doc_text(paper.content)
+        answer_text = doc_text(answer_file.content)
         self.assertIn("无理数", paper_text)
         self.assertNotIn("【答案】", paper_text)
         self.assertIn("【答案】", answer_text)
+        sheet = client.get(files[2]["url"])
+        self.assertEqual(sheet.status_code, 200)
+        sheet_text = doc_text(sheet.content)
+        self.assertIn("易", sheet_text)
+        self.assertIn("合计", sheet_text)
+
+    def test_tiered_name_blueprint_and_mistake_notes(self):
+        from app.docx import save_material
+        from app.exam import write_exam_files
+        from app.mistakes import personal_reason
+        from app.tone import parent_flags
+        from app.agents.router import decide
+
+        self.assertEqual(decide("出一套分层作业", None)["route"], "lesson")
+        self.assertEqual(decide("给家长写一段消息", None)["route"], "office")
+        self.assertIn("差生", parent_flags("这孩子是差生，拖后腿"))
+        self.assertEqual(parent_flags("这次作业里去括号还不稳定，建议在家看一遍步骤。"), [])
+        self.assertTrue(personal_reason("张三 62分"))
+        self.assertEqual(personal_reason("去括号时漏乘"), "")
+
+        db.init_db()
+        user = db.user_by_username("teacher")
+        conversation_id = db.conversation_id(user["id"], "lesson")
+        db.add_message(user["id"], "lesson", "user", "分层")
+        student = (
+            "# 八年级数学分层（满分：3分 时间：20分钟）\n\n"
+            "## 一、单项选择题（每题3分，共3分）\n\n"
+            "1.（3分）下列各数中，是无理数的是（  ）\n"
+            "A. 0.5　　B. √2　　C. 1/3　　D. -7\n"
+        )
+        answer = (
+            "# 八年级数学分层（满分：3分 时间：20分钟）\n\n"
+            "## 一、单项选择题（每题3分，共3分）\n\n"
+            "1.（3分）下列各数中，是无理数的是（  ）\n"
+            "A. 0.5　　B. √2　　C. 1/3　　D. -7\n\n"
+            "【答案】B\n【难度】易\n【知识点】无理数\n【解析】√2 是无理数。\n"
+        )
+        files = write_exam_files(user, conversation_id, student, answer, "基础")
+        self.assertTrue(files[0]["name"].endswith("基础_试卷.docx"))
+        self.assertIn("双向细目表", files[2]["name"])
+        self.assertIn("基础", files[2]["name"])
+        self.assertEqual(db.save_mistake_notes(user["id"], conversation_id, [
+            {"topic": "去括号", "detail": "漏乘"},
+            {"topic": "张三 62分", "detail": "不该记"},
+        ]), 1)
+        notes = db.list_mistake_notes(user["id"], conversation_id)
+        self.assertEqual(notes, [{"topic": "去括号", "detail": "漏乘"}])
+        material = save_material(user, conversation_id, "家长短版", "这次计算题的步骤还不稳定，建议看一遍去括号。")
+        self.assertTrue(material["name"].endswith(".docx"))
+        self.assertEqual(db.delete_conversations(user["id"], [conversation_id]), 1)
+        self.assertEqual(db.list_mistake_notes(user["id"], conversation_id), [])
 
 
 if __name__ == "__main__":

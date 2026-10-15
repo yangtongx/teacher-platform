@@ -1,3 +1,5 @@
+"""在教材库里按中文 bigram 检索。查询和建索引必须用同一套切词，否则对不上。"""
+
 from __future__ import annotations
 
 import re

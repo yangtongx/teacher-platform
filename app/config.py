@@ -1,3 +1,9 @@
+"""运行配置。优先读环境变量，没有再读项目根目录的 .env。
+
+THREAD 是老师看到的那一条对话。office 和 lesson 是背后的两个专家，
+模型不一样：办公用较快的 flash，出题用 v4-pro。
+"""
+
 from __future__ import annotations
 
 import os

@@ -167,6 +167,11 @@ class HardeningTests(unittest.TestCase):
         self.assertEqual(skill_directories("office"), [])
         self.assertTrue(tool_call_allowed("export_exam", "lesson"))
         self.assertFalse(tool_call_allowed("export_exam", "office"))
+        self.assertTrue(tool_call_allowed("export_materials", "office"))
+        self.assertTrue(tool_call_allowed("save_mistakes", "lesson"))
+        self.assertFalse(tool_call_allowed("save_mistakes", "office"))
+        self.assertTrue(tool_call_allowed("review_parent_note", "office"))
+        self.assertFalse(tool_call_allowed("review_parent_note", "lesson"))
         self.assertFalse(tool_call_allowed("bash"))
         self.assertFalse(tool_call_allowed(""))
 

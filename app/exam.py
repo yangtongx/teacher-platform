@@ -53,10 +53,12 @@ build_document = _convert.build_document
 check_exam = _convert.check_exam
 detect_markers = _convert.detect_markers
 is_answer_line = _convert.is_answer_line
+parse_blocks = _convert.parse_blocks
 parse_exam_head = _convert.parse_exam_head
 strip_answer_markers = _convert.strip_answer_markers
 write_docx = _convert.write_docx
 
+LEVELS = {"基础", "提高", "拓展"}
 EXAM_RE = re.compile(r"(出|生成|编写|命制).{0,24}(试卷|试题|习题|练习|期末|期中|单元测)")
 RATIO_RE = re.compile(r"^\d+:\d+:\d+$")
 MARKER = "=====参考答案====="
@@ -96,11 +98,12 @@ SYSTEM = (
     "- 小题写成 1.（N分）题干\n"
     "- 选择题四个选项写在同一行，用两个全角空格隔开：A. …　　B. …　　C. …　　D. …，题干用（  ）留答题位\n"
     "- 填空用至少三个下划线\n"
-    "- 学生试卷禁止出现【答案】【解析】【难度】【评分细则】\n"
+    "- 学生试卷禁止出现【答案】【解析】【难度】【知识点】【评分细则】\n"
     "教师答案：\n"
     "- 标题和大题与学生卷一致，每题重复完整题干和全部选项\n"
-    "- 每题后单独成行 【答案】【难度】【解析】\n"
+    "- 每题后单独成行 【答案】【难度】【知识点】【解析】\n"
     "- 【难度】只能是易、中、难，整卷接近给定的易:中:难比例\n"
+    "- 【知识点】写这一题考查的知识点，不要写学生姓名\n"
     "- 计算题写完整步骤；简答题写评分细则\n"
     "不要编造摘录里没有的课文原文、页码和课标条款。"
     "没有摘录时，在答案开头注明未引用教材原文。\n"
@@ -247,6 +250,12 @@ def public_exam(row, user: object) -> dict:
     books = select_books(user, str(row["request"]))
     paper = f"/files/{row['paper_token']}" if row["paper_token"] else ""
     answer = f"/files/{row['answer_token']}" if row["answer_token"] else ""
+    keys = row.keys()
+    blueprint = ""
+    blueprint_name = ""
+    if "blueprint_token" in keys and row["blueprint_token"]:
+        blueprint = f"/files/{row['blueprint_token']}"
+        blueprint_name = row["blueprint_name"] or ""
     note = ""
     if row["status"] == "done" and wants_listening(row["listening"]):
         note = "听力 MP3 这次没有合成，原文在参考答案里。"
@@ -260,6 +269,8 @@ def public_exam(row, user: object) -> dict:
         "paper_name": row["paper_name"] or "",
         "answer_url": answer,
         "answer_name": row["answer_name"] or "",
+        "blueprint_url": blueprint,
+        "blueprint_name": blueprint_name,
         "listening_note": note,
     }
 
@@ -381,14 +392,84 @@ def _prompt(row, user) -> str:
     return "\n\n".join(part for part in parts if part)
 
 
-def write_exam_files(user, conversation_id: int, student: str, answer: str) -> list[dict]:
-    """学生卷和答案卷各存一份 Word。学生卷里有答案就拒绝导出。"""
+def blueprint_markdown(student: str, answer: str) -> str:
+    """从答案里的题号、知识点和难度整理双向细目表，并核对分值合计。"""
+    head = parse_exam_head(student)
+    section = ""
+    rows = []
+    current = None
+    for block in parse_blocks(answer):
+        if block["type"] == "heading" and block["level"] == 2:
+            section = re.sub(r"（.*?）|\(.*?\)", "", block["text"]).strip()[:30]
+            continue
+        if block["type"] == "question":
+            if current:
+                rows.append(current)
+            current = {
+                "number": block["number"],
+                "score": float(block["score"]),
+                "section": section or "未分大题",
+                "point": "",
+                "level": "",
+            }
+            continue
+        if block["type"] == "marker" and current:
+            if block["name"] == "难度":
+                current["level"] = block["text"] or "未标"
+            elif block["name"] == "知识点":
+                current["point"] = block["text"]
+    if current:
+        rows.append(current)
+    title = head.get("name") or "试卷"
+    lines = [
+        f"# {title} 双向细目表",
+        "",
+        "| 题号 | 范围 | 知识点 | 难度 | 分值 |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    total = 0.0
+    missing = False
+    for row in rows:
+        total += row["score"]
+        point = row["point"] or row["section"]
+        level = row["level"] or "未标"
+        if not row["level"]:
+            missing = True
+        lines.append(
+            f"| {row['number']} | {row['section']} | {point} | {level} | {row['score']:g} |"
+        )
+    declared = head.get("total")
+    lines.append("")
+    if declared is None:
+        lines.append(f"各题分值合计 {_score(total)} 分。")
+    else:
+        same = abs(total - float(declared)) <= 0.01
+        lines.append(
+            f"各题分值合计 {_score(total)} 分，试卷满分 {_score(float(declared))} 分。"
+            + ("" if same else "分值对不上，请老师核对。")
+        )
+    if missing:
+        lines.append("有的题没有标难度。")
+    return "\n".join(lines)
+
+
+def _score(value: float) -> str:
+    return f"{value:g}"
+
+
+def write_exam_files(
+    user, conversation_id: int, student: str, answer: str, level: str = ""
+) -> list[dict]:
+    """学生卷、答案卷和双向细目表各存一份 Word。学生卷里有答案就拒绝导出。"""
     owned = db.conversation_owner(conversation_id)
     if (
         owned is None
         or int(owned["user_id"]) != int(user["id"])
     ):
         raise ValueError("这份对话不能导出试卷。")
+    tier = (level or "").strip()
+    if tier and tier not in LEVELS:
+        raise ValueError("分层只能是基础、提高或拓展。")
     paper = student_markdown(student)
     answer_text = (answer or "").strip()
     if not paper or not answer_text:
@@ -404,22 +485,28 @@ def write_exam_files(user, conversation_id: int, student: str, answer: str) -> l
         raise ValueError("找不到这次对话，试卷没有保存。")
     head = parse_exam_head(paper)
     base = _safe_name(str(head.get("name") or "试卷"))
-    paper_token = secrets.token_urlsafe(16)
-    answer_token = secrets.token_urlsafe(16)
-    paper_name = f"{base}_试卷.docx"
-    answer_name = f"{base}_答案.docx"
+    tier_name = f"{base}_{tier}" if tier else base
+    sheet = blueprint_markdown(paper, answer_text)
+    specs = (
+        (f"{tier_name}_试卷.docx", paper, True),
+        (f"{tier_name}_答案.docx", answer_text, False),
+        (f"{tier_name}_双向细目表.docx", sheet, False),
+    )
     docs = DATA_DIR / "docs"
     docs.mkdir(parents=True, exist_ok=True)
-    write_docx(build_document(paper, student=True, **STYLE), docs / f"{paper_token}.docx")
-    write_docx(build_document(answer_text, student=False, **STYLE), docs / f"{answer_token}.docx")
     user_id = int(user["id"])
-    db.save_document(user_id, message_id, paper_token, paper_name)
-    db.save_document(user_id, message_id, answer_token, answer_name)
     note = "听力 MP3 这次没有合成，原文在参考答案里。" if "听力" in answer_text else ""
-    return [
-        {"name": paper_name, "url": f"/files/{paper_token}", "listening_note": note},
-        {"name": answer_name, "url": f"/files/{answer_token}", "listening_note": ""},
-    ]
+    files = []
+    for filename, body, student_copy in specs:
+        token = secrets.token_urlsafe(16)
+        write_docx(build_document(body, student=student_copy, **STYLE), docs / f"{token}.docx")
+        db.save_document(user_id, message_id, token, filename)
+        files.append({
+            "name": filename,
+            "url": f"/files/{token}",
+            "listening_note": note if student_copy else "",
+        })
+    return files
 
 
 def schedule(exam_id: int) -> None:
@@ -484,15 +571,22 @@ def _write_files(row, paper: str, answer: str) -> None:
     paper_name = f"{base}_试卷.docx"
     answer_name = f"{base}_答案.docx"
     docs = DATA_DIR / "docs"
+    sheet = blueprint_markdown(paper, answer)
+    blue_token = secrets.token_urlsafe(16)
+    blue_name = f"{base}_双向细目表.docx"
     write_docx(build_document(paper, student=True, **STYLE), docs / f"{paper_token}.docx")
     write_docx(build_document(answer, student=False, **STYLE), docs / f"{answer_token}.docx")
+    write_docx(build_document(sheet, student=False, **STYLE), docs / f"{blue_token}.docx")
     user_id = int(row["user_id"])
     db.save_document(user_id, message_id, paper_token, paper_name)
     db.save_document(user_id, message_id, answer_token, answer_name)
+    db.save_document(user_id, message_id, blue_token, blue_name)
     db.finish_exam(
         int(row["id"]),
         paper_token=paper_token,
         paper_name=paper_name,
         answer_token=answer_token,
         answer_name=answer_name,
+        blueprint_token=blue_token,
+        blueprint_name=blue_name,
     )

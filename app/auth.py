@@ -1,3 +1,5 @@
+"""口令哈希。存成 pbkdf2_sha256$迭代次数$盐$摘要，和原来的教师登录同一格式。"""
+
 from __future__ import annotations
 
 import base64

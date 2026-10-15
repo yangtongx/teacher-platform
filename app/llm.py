@@ -1,3 +1,9 @@
+"""直接调用 DeepSeek 的文本接口。
+
+老师日常对话不走这里，由 agents.runtime 里的专家循环处理。
+这里留给意图分拣失败时的补问，以及后台把试卷正文写出来。
+"""
+
 from __future__ import annotations
 
 import json

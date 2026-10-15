@@ -1,3 +1,5 @@
+"""把一条 Markdown 回复收成 Word，给当前登录的老师下载。"""
+
 from __future__ import annotations
 
 import re
@@ -93,3 +95,30 @@ def write_docx(markdown: str, path: Path) -> None:
         _add_runs(paragraph, line.strip(), size=10.5)
     path.parent.mkdir(parents=True, exist_ok=True)
     document.save(path)
+
+
+def save_material(user, conversation_id: int, title: str, markdown: str) -> dict:
+    """把一份文稿收成 Word，挂到当前对话，给老师下载。"""
+    import secrets
+
+    from app import db
+    from app.config import DATA_DIR
+
+    owned = db.conversation_owner(conversation_id)
+    if owned is None or int(owned["user_id"]) != int(user["id"]):
+        raise ValueError("这份对话不能导出文稿。")
+    body = (markdown or "").strip()
+    heading = " ".join(str(title or "").split())[:40]
+    if not body:
+        raise ValueError("文稿是空的，没有导出。")
+    name = heading or document_name(body)
+    if not body.lstrip().startswith("#"):
+        body = f"# {name}\n\n{body}"
+    message_id = db.latest_message_id(conversation_id)
+    if message_id is None:
+        raise ValueError("找不到这次对话，文稿没有保存。")
+    token = secrets.token_urlsafe(16)
+    filename = f"{document_name('# ' + name)}.docx"
+    write_docx(body, DATA_DIR / "docs" / f"{token}.docx")
+    db.save_document(int(user["id"]), message_id, token, filename)
+    return {"name": filename, "url": f"/files/{token}"}

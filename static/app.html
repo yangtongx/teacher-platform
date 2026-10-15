@@ -65,6 +65,8 @@
     <p id="password-msg" class="error" hidden></p>
   </form>
   <script>
+    // 左侧是对话列表，中间是消息。发送后按 SSE 往当前气泡里追加文字。
+    // 回车发送，Shift+回车换行。下载框只跟第一次出现的文件走，不在后面的回复下重复。
     const messagesEl = document.getElementById("messages");
     const noticeEl = document.getElementById("notice");
     const whoEl = document.getElementById("who");
@@ -140,6 +142,7 @@
     let agentPending = null;
     let agentFiles = [];
 
+    // 把助手回复里的 Markdown 收成页面上的标题、列表和加粗。
     function escapeHtml(text) {
       return text
         .replace(/&/g, "&amp;")
@@ -310,7 +313,7 @@
       if (!items.length) {
         const empty = document.createElement("div");
         empty.className = "hello";
-        empty.innerHTML = "<h1>今天想处理什么？</h1><p>可以写通知、整理材料，或出一份试卷。</p>";
+        empty.innerHTML = "<h1>今天想处理什么？</h1><p>可以出分层作业、写教案和说课稿，或给家长写一段能直接发的短消息。</p>";
         messagesEl.appendChild(empty);
         return;
       }
@@ -326,6 +329,7 @@
       scrollMessages();
     }
 
+    // 对话列表：分组、改名、多选删除。底部删除条只在点了「选择」后出现。
     function threadGroup(updated) {
       const date = new Date(updated || "");
       if (Number.isNaN(date.getTime())) return "更早";
@@ -517,6 +521,7 @@
       showThread(await res.json());
     }
 
+    // 本轮对话里老师上传的材料，只作为这一段对话的资料。
     function renderUploads(items) {
       filesEl.innerHTML = "";
       for (const item of items) {
@@ -679,6 +684,7 @@
       return box;
     }
 
+    // 出卷确认，以及试卷 Word。同一下载链接只出现在第一次生成它的那条消息下。
     function examCard(exam) {
       if (exam.status === "asking") return askingCard(exam);
       const box = document.createElement("div");
@@ -698,6 +704,7 @@
         links.className = "ask-links";
         if (exam.paper_url) links.appendChild(fileLink(exam.paper_url, exam.paper_name || "下载试卷"));
         if (exam.answer_url) links.appendChild(fileLink(exam.answer_url, exam.answer_name || "下载参考答案"));
+        if (exam.blueprint_url) links.appendChild(fileLink(exam.blueprint_url, exam.blueprint_name || "下载双向细目表"));
         box.appendChild(links);
         if (exam.listening_note) {
           const extra = document.createElement("p");
@@ -1032,6 +1039,7 @@
       renderUploads(data.uploads || []);
     });
 
+    // 回车发送。Shift+回车换行。中文输入法选词时的回车不发送。
     inputEl.addEventListener("keydown", (event) => {
       if (event.key !== "Enter" || event.shiftKey || event.isComposing || event.keyCode === 229) return;
       event.preventDefault();

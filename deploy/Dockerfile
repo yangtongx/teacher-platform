@@ -1,6 +1,13 @@
 FROM python:3.12-slim-bookworm
 
-RUN apt-get update \
+# 服务器在国内，系统库走华为云镜像。Debian 官方源从这台机器下载很慢。
+RUN if [ -f /etc/apt/sources.list ]; then \
+      sed -i 's|deb.debian.org|mirrors.huaweicloud.com|g; s|security.debian.org|mirrors.huaweicloud.com|g' /etc/apt/sources.list; \
+    fi \
+    && if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
+      sed -i 's|deb.debian.org|mirrors.huaweicloud.com|g; s|security.debian.org|mirrors.huaweicloud.com|g' /etc/apt/sources.list.d/debian.sources; \
+    fi \
+    && apt-get update \
     && apt-get install -y --no-install-recommends libgomp1 libglib2.0-0 libgl1 \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system --gid 10001 teacher \

@@ -405,7 +405,13 @@ async def upload_document(request: Request):
             "notice": "这份课件只用来记样式，不会把里面的旧内容抄进新课件。",
         }
     try:
-        text = extract_text(filename, data)
+        suffix = Path(filename).suffix.lower()
+        if suffix in {".csv", ".xlsx", ".xlsm", ".xls"}:
+            from app.extract import read_table
+
+            text = read_table(filename, data)
+        else:
+            text = extract_text(filename, data)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     db.add_upload(user_id, THREAD, filename, text)

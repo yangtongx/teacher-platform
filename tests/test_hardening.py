@@ -453,6 +453,225 @@ class HardeningTests(unittest.TestCase):
         self.assertIn("出题", ask.text)
         self.assertEqual(len(seen), 2)
 
+    def test_router_splits_without_punctuation_or_with_typos(self):
+        from app.agents.router import decide
+
+        spoken = decide("先给我出一套卷子然后通知莫某家长", None)
+        self.assertEqual(spoken["route"], "lesson")
+        self.assertEqual(spoken["task"], "先给我出一套卷子")
+        self.assertEqual(spoken["next"], "通知莫某家长")
+
+        typo = decide("先给我出一套试券然后通只莫某家长", None)
+        self.assertEqual(typo["route"], "lesson")
+        self.assertEqual(typo["task"], "先给我出一套试券")
+        self.assertEqual(typo["next"], "通只莫某家长")
+
+        jammed = decide("出一套卷子通知莫某家长", None)
+        self.assertEqual(jammed["route"], "lesson")
+        self.assertEqual(jammed["task"], "出一套卷子")
+        self.assertEqual(jammed["next"], "通知莫某家长")
+
+        spaced = decide("出一套卷子 通知莫某家长", None)
+        self.assertEqual(spaced["route"], "lesson")
+        self.assertEqual(spaced["next"], "通知莫某家长")
+
+        again = decide("出一套卷子再通知莫某家长", None)
+        self.assertEqual(again["route"], "lesson")
+        self.assertEqual(again["next"], "通知莫某家长")
+
+        self.assertEqual(decide("再出一道", "lesson")["route"], "lesson")
+        self.assertEqual(decide("再出一道", "lesson")["next"], "")
+        self.assertEqual(decide("通知家长试卷好了", None)["route"], "office")
+        self.assertEqual(decide("通知家长试卷好了", None)["next"], "")
+        topic = decide("出一套关于通知的阅读理解", None)
+        self.assertEqual(topic["route"], "lesson")
+        self.assertEqual(topic["next"], "")
+        theme = decide("出一套家长会主题的试卷", None)
+        self.assertEqual(theme["route"], "lesson")
+        self.assertEqual(theme["next"], "")
+
+    def test_model_classifies_before_keywords(self):
+        import asyncio
+        from unittest.mock import patch
+
+        from app.agents import router as agent_router
+        from app.agents.router import describe_files, guard_grades, resolve_route
+
+        briefs = [
+            {"filename": "一次.xlsx", "kind": "成绩表"},
+            {"filename": "二次.xlsx", "kind": "成绩表"},
+        ]
+        note = describe_files(briefs)
+        self.assertIn("一次.xlsx", note)
+        self.assertIn("成绩表", note)
+        self.assertNotIn("张三", note)
+
+        held = guard_grades(
+            {"route": "office", "task": "出一套试卷", "next": "", "question": ""},
+            briefs,
+            "出一套试卷",
+        )
+        self.assertEqual(held["route"], "lesson")
+        self.assertEqual(held["task"], "出一套试卷")
+        self.assertIn("进退步", held["question"])
+        self.assertNotIn("这两份", held["question"])
+        self.assertEqual(held["files"], ["一次.xlsx", "二次.xlsx"])
+
+        one = guard_grades(
+            {"route": "lesson", "task": "出一套试卷", "next": "", "question": ""},
+            [{"filename": "20260315.xlsx", "kind": "成绩表", "hint": "表头像成绩，有姓名和分数，约 2 行"}],
+            "出一套试卷",
+        )
+        self.assertIn("这份", one["question"])
+        self.assertNotIn("进退步", one["question"])
+        self.assertEqual(one["files"], ["20260315.xlsx"])
+
+        outline = guard_grades(
+            {"route": "lesson", "task": "出一套试卷", "next": "", "question": ""},
+            [{"filename": "20260315.docx", "kind": "大纲", "hint": "内容在讲考试范围或知识点"}],
+            "出一套试卷",
+        )
+        self.assertEqual(outline["question"], "")
+        self.assertEqual(outline["next"], "")
+
+        compared = guard_grades(
+            {"route": "lesson", "task": "出一套试卷并对比两次成绩", "next": "通知家长", "question": "要对比吗？"},
+            briefs,
+            "出一套试卷并对比两次成绩",
+        )
+        self.assertEqual(compared["question"], "")
+        self.assertEqual(compared["next"], "通知家长")
+
+        calls = []
+
+        async def fake(content, previous, previous_text, files=None):
+            calls.append(content)
+            if "试券" in content:
+                return "不是 json"
+            return '{"route":"office","task":"写通知","next":"","files":[],"question":""}'
+
+        previous_key = agent_router.DEEPSEEK_API_KEY
+        agent_router.DEEPSEEK_API_KEY = "test-key"
+        try:
+            with patch.object(agent_router, "_ask_model", fake):
+                routed = asyncio.run(resolve_route("帮我出一套期中试卷", None))
+                followed = asyncio.run(resolve_route("再出一道", "lesson"))
+                broken = asyncio.run(resolve_route("出一套试券然后通只家长", None))
+        finally:
+            agent_router.DEEPSEEK_API_KEY = previous_key
+        self.assertEqual(routed["route"], "office")
+        self.assertEqual(routed["task"], "写通知")
+        self.assertEqual(followed["route"], "lesson")
+        self.assertEqual(followed["next"], "")
+        self.assertEqual(calls, ["帮我出一套期中试卷", "出一套试券然后通只家长"])
+        self.assertEqual(broken["route"], "ask")
+        self.assertIn("出题", broken["question"])
+        agreed = asyncio.run(
+            resolve_route(
+                "要",
+                "lesson",
+                "这份表是考试成绩，出卷不会用到学生分数。要我按它看薄弱点，还是先只出卷？",
+                briefs,
+            )
+        )
+        self.assertEqual(agreed["route"], "office")
+        self.assertIn("成绩", agreed["task"])
+        self.assertNotIn("要", calls)
+
+    def test_grade_sheets_stay_out_of_the_exam(self):
+        import zipfile
+        from io import BytesIO
+
+        from app.config import THREAD
+        from app.extract import read_table
+
+        shared = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            "<si><t>姓名</t></si><si><t>语文</t></si><si><t>张三</t></si></sst>"
+        )
+        sheet = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            "<sheetData><row>"
+            '<c t="s"><v>0</v></c><c t="s"><v>1</v></c>'
+            "</row><row>"
+            '<c t="s"><v>2</v></c><c><v>88</v></c>'
+            "</row></sheetData></worksheet>"
+        )
+        buffer = BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("xl/sharedStrings.xml", shared)
+            archive.writestr("xl/worksheets/sheet1.xml", sheet)
+        text = read_table("一次.xlsx", buffer.getvalue())
+        self.assertTrue(text.startswith("【成绩表】"))
+        self.assertIn("张三", text)
+
+        user = db.user_by_username("teacher")
+        conversation_id = db.conversation_id(user["id"], THREAD)
+        db.add_upload(user["id"], THREAD, "一次.xlsx", text)
+        hidden = db.upload_context(user["id"], "lesson", conversation=conversation_id)
+        office = db.upload_context(user["id"], "office", conversation=conversation_id)
+        shown = db.upload_context(
+            user["id"], "office", conversation=conversation_id, include_grades=True
+        )
+        self.assertNotIn("张三", hidden)
+        self.assertNotIn("张三", office)
+        self.assertIn("张三", shown)
+        from app.extract import brief_upload
+
+        dated = brief_upload("20260315.xlsx", text)
+        self.assertEqual(dated["kind"], "成绩表")
+        self.assertNotIn("张三", dated["hint"])
+        scope = brief_upload("20260315.docx", "高二数学期中考试范围：函数与导数")
+        self.assertEqual(scope["kind"], "大纲")
+        self.assertNotIn("张三", scope["hint"])
+        from app.extract import OCR_NOTE
+        from app.agents.router import keep_exam_sources
+
+        photo = (
+            OCR_NOTE
+            + "\n1. 下列各数中，是无理数的是（ ）\nA. 0.5　　B. √2　　C. 1/3　　D. -7\n"
+        )
+        handwritten = brief_upload("IMG_3842.jpg", photo)
+        self.assertEqual(handwritten["kind"], "题目")
+        self.assertNotIn("无理数", handwritten["hint"])
+        sheet_photo = brief_upload("IMG_100.jpg", OCR_NOTE + "\n姓名\t语文\n张三\t88\n")
+        self.assertEqual(sheet_photo["kind"], "成绩表")
+        folded = keep_exam_sources(
+            {
+                "route": "office",
+                "task": "看看照片",
+                "next": "把 IMG_3842.jpg 收进通知",
+                "question": "",
+                "files": ["IMG_3842.jpg"],
+            },
+            [handwritten],
+            "出一套题把这个也加上去",
+        )
+        self.assertEqual(folded["route"], "lesson")
+        self.assertEqual(folded["task"], "出一套题把这个也加上去")
+        self.assertEqual(folded["next"], "")
+        self.assertEqual(folded["files"], [])
+        db.add_upload(user["id"], THREAD, "IMG_3842.jpg", photo)
+        db.add_upload(user["id"], THREAD, "20260315.docx", "高二数学期中考试范围：函数与导数")
+        lesson_text = db.upload_context(user["id"], "lesson", conversation=conversation_id)
+        self.assertIn("函数与导数", lesson_text)
+        self.assertIn("无理数", lesson_text)
+        self.assertNotIn("张三", lesson_text)
+        office_plain = db.upload_context(user["id"], "office", conversation=conversation_id)
+        self.assertNotIn("无理数", office_plain)
+        briefs = db.upload_briefs(conversation_id)
+        kinds = {item["filename"]: item["kind"] for item in briefs}
+        self.assertEqual(kinds["一次.xlsx"], "成绩表")
+        self.assertEqual(kinds["20260315.docx"], "大纲")
+        self.assertEqual(kinds["IMG_3842.jpg"], "题目")
+        photo_brief = next(item for item in briefs if item["filename"] == "IMG_3842.jpg")
+        self.assertNotIn("无理数", photo_brief["hint"])
+        with db.connect() as conn:
+            conn.execute("DELETE FROM uploads WHERE user_id = ?", (user["id"],))
+            conn.commit()
+
     def test_office_cannot_export_an_exam(self):
         from app.exam import write_exam_files
 

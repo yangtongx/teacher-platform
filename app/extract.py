@@ -7,6 +7,7 @@ PDF 先读文字层。没有文字的页，以及 jpg、png，都交给 image_oc
 
 from __future__ import annotations
 
+import re
 import zipfile
 from io import BytesIO
 from pathlib import Path
@@ -18,6 +19,100 @@ MIN_PAGE_CHARS = 12
 MAX_UNCOMPRESSED = 20 * 1024 * 1024
 MAX_ZIP_ENTRIES = 200
 OCR_NOTE = "以下内容来自图片或扫描页识别，请核对。"
+GRADE_MARK = "【成绩表】"
+TABLE_MARK = "【表格】"
+_SPREADSHEET_NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+
+
+def read_table(filename: str, data: bytes) -> str:
+    """读 csv / xlsx。成绩表会打上标记，分类时只看文件名，不看单元格。"""
+    suffix = Path(filename).suffix.lower()
+    if suffix == ".csv":
+        grid = _decode(data)
+    elif suffix in {".xlsx", ".xlsm"}:
+        grid = _xlsx(data)
+    elif suffix == ".xls":
+        raise ValueError("请把表格另存为 xlsx 后再上传")
+    else:
+        raise ValueError("只支持 csv 和 xlsx")
+    grid = grid.replace("\x00", "").strip()
+    if not grid:
+        raise ValueError("这份表格里没有读出内容")
+    if len(grid) > MAX_CHARS:
+        grid = grid[:MAX_CHARS] + "\n…（后面省略）"
+    mark = GRADE_MARK if _looks_like_grades(grid) else TABLE_MARK
+    return mark + "\n" + grid
+
+
+def _looks_like_grades(text: str) -> bool:
+    head = text[:500]
+    named = "姓名" in head or "学生" in head
+    scored = any(word in head for word in ("分数", "成绩", "得分", "总分", "语文", "数学", "英语"))
+    return named and scored
+
+
+def _looks_like_outline(text: str) -> bool:
+    if _looks_like_grades(text):
+        return False
+    head = text[:800]
+    return any(word in head for word in ("考试范围", "考试大纲", "大纲", "知识点", "双向细目", "考查", "题型", "命题"))
+
+
+def brief_upload(filename: str, text: str) -> dict:
+    """按正文判断附件，不看文件名。文件名可能只是日期或 IMG。摘要里不放学生姓名和分数。"""
+    name = str(filename or "").replace("\n", " ").strip()
+    raw = str(text or "")
+    body = raw
+    for mark in (GRADE_MARK, TABLE_MARK, OCR_NOTE):
+        if body.startswith(mark):
+            body = body[len(mark) :].lstrip("\n")
+    photo = raw.startswith(OCR_NOTE)
+    if raw.startswith(GRADE_MARK) or _looks_like_grades(body):
+        kind, hint = "成绩表", _shape_hint(body, "表头像成绩，有姓名和分数")
+    elif _looks_like_questions(body):
+        where = "照片或扫描识别出的题目" if photo else "正文是题目"
+        kind, hint = "题目", f"{where}，需核对，约 {_question_count(body)} 道"
+    elif _looks_like_outline(body):
+        kind, hint = "大纲", "内容在讲考试范围或知识点"
+    elif raw.startswith(TABLE_MARK):
+        kind, hint = "表格", _shape_hint(body, "普通表格")
+    elif photo:
+        kind, hint = "照片", "图片识别的文字，需核对"
+    else:
+        kind, hint = "文档", _first_line_hint(body)
+    return {"filename": name, "kind": kind, "hint": hint}
+
+
+def _looks_like_questions(text: str) -> bool:
+    if _looks_like_grades(text):
+        return False
+    numbered = re.search(r"(?m)^\s*\d{1,2}[.、．]", text)
+    choices = re.search(r"[AＡ][.、．\s].{0,80}[BＢ][.、．\s]", text)
+    if numbered and choices:
+        return True
+    if re.search(r"选择题|填空题|判断题|解答题|计算题", text):
+        return True
+    if numbered and ("____" in text or "___" in text or "（ ）" in text or "( )" in text):
+        return True
+    return False
+
+
+def _question_count(text: str) -> int:
+    found = re.findall(r"(?m)^\s*\d{1,2}[.、．]", text)
+    return max(1, len(found))
+
+
+def _shape_hint(body: str, label: str) -> str:
+    rows = [line for line in body.splitlines() if line.strip() and not line.startswith("…")]
+    return f"{label}，约 {len(rows)} 行"
+
+
+def _first_line_hint(body: str) -> str:
+    for line in body.splitlines():
+        line = line.strip()
+        if line and not line.startswith("【"):
+            return line[:40]
+    return "有正文"
 
 
 def extract_text(filename: str, data: bytes) -> str:
@@ -181,14 +276,82 @@ def _recognize_image(image) -> str:
         raise ValueError("这张图片没有识别出来") from exc
 
 
-def _reject_zip(data: bytes) -> None:
+def _xlsx(data: bytes) -> str:
+    import xml.etree.ElementTree as ET
+
+    _reject_zip(data, "这份表格读不出来")
     try:
         archive = zipfile.ZipFile(BytesIO(data))
     except zipfile.BadZipFile as exc:
-        raise ValueError("这份 Word 读不出来") from exc
+        raise ValueError("这份表格读不出来") from exc
+    with archive:
+        names = archive.namelist()
+        shared = _shared_strings(archive, names)
+        sheets = sorted(name for name in names if name.startswith("xl/worksheets/sheet"))
+        if not sheets:
+            raise ValueError("这份表格里没有读出内容")
+        try:
+            root = ET.fromstring(archive.read(sheets[0]))
+        except ET.ParseError as exc:
+            raise ValueError("这份表格读不出来") from exc
+    lines = []
+    for row in root.iter(_SPREADSHEET_NS + "row"):
+        cells = []
+        for cell in row.findall(_SPREADSHEET_NS + "c"):
+            value = _cell_value(cell, shared).strip()
+            if value:
+                cells.append(value)
+        if cells:
+            lines.append("\t".join(cells))
+        if len(lines) >= 200:
+            lines.append("…（后面的行省略）")
+            break
+    return "\n".join(lines)
+
+
+def _shared_strings(archive: zipfile.ZipFile, names: list[str]) -> list[str]:
+    if "xl/sharedStrings.xml" not in names:
+        return []
+    import xml.etree.ElementTree as ET
+
+    root = ET.fromstring(archive.read("xl/sharedStrings.xml"))
+    values = []
+    for item in root.findall(_SPREADSHEET_NS + "si"):
+        chunks = []
+        for child in item:
+            if child.tag == _SPREADSHEET_NS + "t":
+                chunks.append(child.text or "")
+            elif child.tag == _SPREADSHEET_NS + "r":
+                node = child.find(_SPREADSHEET_NS + "t")
+                if node is not None and node.text:
+                    chunks.append(node.text)
+        values.append("".join(chunks))
+    return values
+
+
+def _cell_value(cell, shared: list[str]) -> str:
+    kind = cell.attrib.get("t", "")
+    if kind == "inlineStr":
+        node = cell.find(".//" + _SPREADSHEET_NS + "t")
+        return node.text or "" if node is not None else ""
+    node = cell.find(_SPREADSHEET_NS + "v")
+    raw = node.text or "" if node is not None else ""
+    if kind == "s":
+        try:
+            return shared[int(raw)]
+        except (ValueError, IndexError):
+            return ""
+    return raw
+
+
+def _reject_zip(data: bytes, broken: str = "这份 Word 读不出来") -> None:
+    try:
+        archive = zipfile.ZipFile(BytesIO(data))
+    except zipfile.BadZipFile as exc:
+        raise ValueError(broken) from exc
     infos = archive.infolist()
     if len(infos) > MAX_ZIP_ENTRIES:
-        raise ValueError("这份 Word 读不出来")
+        raise ValueError(broken)
     total = sum(info.file_size for info in infos)
     if total > MAX_UNCOMPRESSED:
-        raise ValueError("这份 Word 太大")
+        raise ValueError(broken)

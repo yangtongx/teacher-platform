@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import json
+import re
 
 from app import db
 from app.agents.registry import specialist, tool_call_allowed
@@ -13,6 +14,11 @@ from app.config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, IDENTITIES
 
 _teacher = contextvars.ContextVar("teacher_turn", default=None)
 bind_teacher(_teacher.get)
+_GRADE_TURN = re.compile(r"成绩|分数|对比|进退步|薄弱|成绩表")
+
+
+def _grade_turn(text: str) -> bool:
+    return bool(_GRADE_TURN.search(text or ""))
 
 
 def _credential(ns: dict):
@@ -224,7 +230,12 @@ async def respond(
             incoming = _resume_event(ns, pending, answers, False)
         else:
             body = content or ""
-            uploads = db.upload_context(int(user["id"]), identity, conversation=conversation_id)
+            uploads = db.upload_context(
+                int(user["id"]),
+                identity,
+                conversation=conversation_id,
+                include_grades=identity == "office" and _grade_turn(body),
+            )
             if uploads:
                 body = body + "\n\n" + uploads
             incoming = ns["UserMsg"](name=str(user["display_name"] or "老师"), content=body)
